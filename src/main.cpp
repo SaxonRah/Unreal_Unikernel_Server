@@ -1,3 +1,4 @@
+#include "control_channel_probe.h"
 #include "udp_util.h"
 #include "ue57_protocol.h"
 
@@ -76,10 +77,10 @@ int main(int argc, char **argv) {
 
   printf("UE5 5.7.4 NanoS endpoint starter listening on UDP/%u\n",
          (unsigned)port);
-  printf("mode: real StatelessConnect handshake attempt + temporary UECTL "
-         "smoke-test harness\n");
-  printf("note: after Ack, this still logs post-handshake packets; real "
-         "control-channel serialization is next\n");
+  printf("mode: real StatelessConnect handshake attempt + post-handshake "
+         "control-channel probe\n");
+  printf("note: after Ack, this now scans likely control-channel bunches; "
+         "server replies are still experimental/TODO\n");
 
   std::unordered_map<UdpClientKey, Session, UdpClientKeyHash> sessions;
   uint8_t buf[4096];
@@ -201,8 +202,22 @@ int main(int argc, char **argv) {
         printf("  likely UE post-handshake datagram for validated session "
                "phase=%s\n",
                ue574::session_phase_name(it->second.phase));
-        printf("  TODO: decode UNetConnection packet header and "
-               "control-channel bunch\n");
+        ue574::PostHandshakeProbeReport report =
+            ue574::probe_post_handshake_packet(buf, (size_t)n);
+        printf("%s", ue574::format_post_handshake_report(report).c_str());
+        for (const auto &cand : report.candidates) {
+          if (cand.plausible && cand.first_payload_byte == ue574::NMT_Hello) {
+            it->second.phase = ue574::SessionPhase::SawHello;
+            printf("  observed likely NMT_Hello; next implementation target is "
+                   "packet header writer + NMT_Challenge bunch\n");
+            break;
+          }
+          if (cand.plausible && cand.first_payload_byte == ue574::NMT_Login) {
+            printf("  observed likely NMT_Login; next implementation target is "
+                   "NMT_Welcome bunch\n");
+            break;
+          }
+        }
       } else {
         printf(
             "  likely UE binary datagram before local session is validated\n");
