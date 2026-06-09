@@ -1,7 +1,11 @@
-# Run with experimental replies:
+# Build:
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+```
+
+# Run with experimental replies:
+```
 ./build/ue574_endpoint --port 7777 --binlog ue574-real-client.binlog --experimental-control-replies
 ```
 
@@ -9,3 +13,5 @@ cmake --build build -j
 ```
 open 127.0.0.1:7777
 ```
+
+The remaining hard unknown is: `UPackageMap::StaticSerializeName(NAME_Control)`
