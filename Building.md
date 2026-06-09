@@ -1,28 +1,36 @@
-# Local Build:
+# It now builds two binaries:
+```
+ue574_endpoint
+ue574_temp_client
+```
+
+# Build:
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./build/ue5relay 7777
 ```
 
-# Run under NanoS/ops:
+# Run server:
 ```
-ops run ./build/ue5relay -p 7777/udp
+./build/ue574_endpoint --port 7777 --binlog packets.binlog
 ```
 
-# Note:
-The important limitation: this is not wire compatible with UE5 yet. It is the harness we need before adding the real UE5 bitstream format. The temporary protocol is deliberately obvious:
-
+# Run temporary test client:
 ```
-client: "UEHS" 0x01
-server: "UEHS" 0x81 <cookie>
-
-client: "UEHS" 0x02 <cookie>
-server: "UEHS" 0x82
-
-client: "UECTL" 0x01
-server: "UECTL" 0x82
-
-client: "UECTL" 0x03
-server: "UECTL" 0x84 ...
+./build/ue574_temp_client 127.0.0.1 7777
 ```
+# Expected result:
+```
+temporary flow complete
+```
+
+# Run with NanoS/ops:
+```
+ops run ./build/ue574_endpoint -p 7777/udp
+```
+
+# The important file is:
+```
+src/ue57_protocol.cpp
+```
+That is where the real UE5.7.4 wire compatibility goes. I deliberately separated the temporary harness from the future UE implementation so we can replace the fake UEHS / UECTL packets without rewriting the UDP server, session tracking, logging, NanoS path, or cookie machinery.
