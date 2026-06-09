@@ -13,14 +13,12 @@ static constexpr uint32_t MaxChSequence = 1024;
 
 const char *name_wire_mode_name(NameWireMode mode) {
   switch (mode) {
-  case NameWireMode::OmitName:
-    return "omit-name";
-  case NameWireMode::SmallHardcodedIndex:
-    return "small-hardcoded-index";
-  case NameWireMode::AnsiString:
-    return "ansi-string";
-  case NameWireMode::LegacyChannelTypeControl:
-    return "legacy-channel-type-control";
+  case NameWireMode::StaticSerializeNameStringControl:
+    return "static-serialize-name-string-Control";
+  case NameWireMode::SmallHardcodedIndexProbe:
+    return "small-hardcoded-index-probe";
+  case NameWireMode::LegacyChannelTypeControlProbe:
+    return "legacy-channel-type-control-probe";
   }
   return "?";
 }
@@ -95,40 +93,6 @@ static void write_packet_notify_header(BitWriter &w, uint16_t seq,
       0); // empty/synthetic ack history word for the first experimental reply
 }
 
-static void write_fname_control_placeholder(BitWriter &w, NameWireMode mode) {
-  // TODO: replace with UPackageMap::StaticSerializeName(NAME_Control).
-  // These modes are only candidate probes. They deliberately keep all name
-  // serialization in one place so the real implementation can replace it.
-  switch (mode) {
-  case NameWireMode::OmitName:
-    return;
-  case NameWireMode::SmallHardcodedIndex:
-    // Candidate shape: small non-string integer id. The value is not
-    // asserted to be correct; it is useful for packet experiments only.
-    w.write_bit(true);     // candidate: is hardcoded/integer
-    w.write_int_packed(0); // candidate id placeholder
-    return;
-  case NameWireMode::AnsiString: {
-    // Candidate shape for the fallback path in StaticSerializeName: an
-    // archive string-ish representation of FName("Control"). This is
-    // intentionally still a probe, not an assertion of the final format.
-    const char name[] = "Control";
-    w.write_u32(sizeof(name));
-    w.write_bytes(reinterpret_cast<const uint8_t *>(name), sizeof(name));
-    return;
-  }
-  case NameWireMode::LegacyChannelTypeControl:
-    // Pre-ChannelNames path in UNetConnection::ReceivedPacket reads
-    // Reader.ReadInt(CHTYPE_MAX), with CHTYPE_Control == 1 and
-    // CHTYPE_MAX == 8, so this is three LSB-first bits: 001. Modern
-    // 5.7.4 should normally use StaticSerializeName instead, but keeping
-    // this candidate is useful if the early connection has not negotiated
-    // channel-name serialization as expected.
-    w.write_int_wrapped(1, 8);
-    return;
-  }
-}
-
 static void write_i32(BitWriter &w, int32_t v) { w.write_u32((uint32_t)v); }
 
 static void write_ue_fstring_ansi(BitWriter &w, const std::string &text) {
@@ -141,6 +105,49 @@ static void write_ue_fstring_ansi(BitWriter &w, const std::string &text) {
     w.write_bytes(reinterpret_cast<const uint8_t *>(text.data()), text.size());
   }
   w.write_u8(0);
+}
+
+static void write_static_serialize_name_control_string_path(BitWriter &w) {
+  // CoreNet.cpp, UPackageMap::StaticSerializeName save path:
+  //
+  //   const EName* InEName = InName.ToEName();
+  //   uint8 bHardcoded = InEName && ShouldReplicateAsInteger(*InEName, InName);
+  //   Ar.SerializeBits(&bHardcoded, 1);
+  //   if (bHardcoded)
+  //       Ar.SerializeIntPacked(NameIndex);
+  //   else
+  //       Ar << FString(PlainName) << int32(Number);
+  //
+  // The load path accepts either representation. We deliberately use the
+  // string fallback for NAME_Control so we do not need the private numeric
+  // EName::Control index from UnrealNames.inl.
+  w.write_bit(false);                  // bHardcoded = 0 => string fallback
+  write_ue_fstring_ansi(w, "Control"); // FName plain name string
+  write_i32(w, 0);                     // FName number
+}
+
+static void write_fname_control(BitWriter &w, NameWireMode mode) {
+  switch (mode) {
+  case NameWireMode::StaticSerializeNameStringControl:
+    write_static_serialize_name_control_string_path(w);
+    return;
+
+  case NameWireMode::SmallHardcodedIndexProbe:
+    // Optional probe only. Real exact hardcoded path would be:
+    //   bit 1 + SerializeIntPacked((uint32)EName::Control)
+    // Uploading/searching UnrealNames.inl could replace this value, but
+    // the string path above should already be accepted by StaticSerializeName.
+    w.write_bit(true);
+    w.write_int_packed(0);
+    return;
+
+  case NameWireMode::LegacyChannelTypeControlProbe:
+    // Pre-ChannelNames path in UNetConnection::ReceivedPacket reads
+    // Reader.ReadInt(CHTYPE_MAX), with CHTYPE_Control == 1 and
+    // CHTYPE_MAX == 8, so this is three LSB-first bits: 001.
+    w.write_int_wrapped(1, 8);
+    return;
+  }
 }
 
 static void write_control_message_payload(BitWriter &w,
@@ -186,7 +193,7 @@ build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
   normal.write_bit(false);    // bPartial
   normal.write_int_wrapped(in.next_out_reliable_ch0 & (MaxChSequence - 1),
                            MaxChSequence);
-  write_fname_control_placeholder(normal, in.name_mode);
+  write_fname_control(normal, in.name_mode);
   normal.write_int_wrapped(bunch_payload.bit_count(),
                            1024 * 8); // MaxPacket-ish bound for prototype
   normal.append_bits(bunch_payload);
@@ -225,9 +232,9 @@ std::vector<std::vector<uint8_t>>
 build_experimental_nmt_challenge_candidates(const UEHandshake &response,
                                             uint16_t last_client_packet_seq) {
   std::vector<std::vector<uint8_t>> out;
-  for (NameWireMode mode :
-       {NameWireMode::OmitName, NameWireMode::SmallHardcodedIndex,
-        NameWireMode::AnsiString, NameWireMode::LegacyChannelTypeControl}) {
+  for (NameWireMode mode : {NameWireMode::StaticSerializeNameStringControl,
+                            NameWireMode::SmallHardcodedIndexProbe,
+                            NameWireMode::LegacyChannelTypeControlProbe}) {
     auto in = base_input(response, last_client_packet_seq);
     in.message_id = NMT_Challenge;
     in.message_strings = {"00000000"};
@@ -241,9 +248,9 @@ std::vector<std::vector<uint8_t>>
 build_experimental_nmt_welcome_candidates(const UEHandshake &response,
                                           uint16_t last_client_packet_seq) {
   std::vector<std::vector<uint8_t>> out;
-  for (NameWireMode mode :
-       {NameWireMode::OmitName, NameWireMode::SmallHardcodedIndex,
-        NameWireMode::AnsiString, NameWireMode::LegacyChannelTypeControl}) {
+  for (NameWireMode mode : {NameWireMode::StaticSerializeNameStringControl,
+                            NameWireMode::SmallHardcodedIndexProbe,
+                            NameWireMode::LegacyChannelTypeControlProbe}) {
     auto in = base_input(response, last_client_packet_seq);
     in.message_id = NMT_Welcome;
     in.message_strings = {"/Game/Maps/Minimal", "/Script/Engine.GameModeBase",

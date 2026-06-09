@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ue5_574_nanos_endpoint_v2 CXX)
+project(ue5_574_nanos_endpoint_v8 CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

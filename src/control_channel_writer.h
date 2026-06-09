@@ -10,13 +10,18 @@
 namespace ue574 {
 
 enum class NameWireMode : uint8_t {
-  // Candidate modes until UPackageMap::StaticSerializeName(NAME_Control) is
-  // implemented exactly. CoreNet.h confirms UPackageMap owns this hook; the
-  // missing piece is the CoreUObject implementation body.
-  OmitName = 0,
-  SmallHardcodedIndex = 1,
-  AnsiString = 2,
-  LegacyChannelTypeControl = 3,
+  // CoreNet.cpp confirms UPackageMap::StaticSerializeName writes either:
+  //   bit 1 + packed hardcoded EName index
+  // or:
+  //   bit 0 + FString plain name + int32 name number.
+  //
+  // We use the string fallback because it is accepted by the load path and
+  // does not require knowing the engine's numeric EName::Control index.
+  StaticSerializeNameStringControl = 0,
+
+  // Kept only as optional probes while testing against a real client.
+  SmallHardcodedIndexProbe = 1,
+  LegacyChannelTypeControlProbe = 2,
 };
 
 struct PacketNotifyHeaderMini {
@@ -38,7 +43,7 @@ struct ControlReplyBuildInput {
   uint8_t message_id = 0;
   std::string message_text;
   std::vector<std::string> message_strings;
-  NameWireMode name_mode = NameWireMode::OmitName;
+  NameWireMode name_mode = NameWireMode::StaticSerializeNameStringControl;
 };
 
 PacketNotifyHeaderMini
