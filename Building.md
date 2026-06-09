@@ -1,8 +1,5 @@
-# It now builds two binaries:
-```
-ue574_endpoint
-ue574_temp_client
-```
+# Building
+I compiled and tested it locally. The probe successfully performs: `Initial -> Challenge -> Response -> Ack`
 
 # Build:
 ```
@@ -15,13 +12,9 @@ cmake --build build -j
 ./build/ue574_endpoint --port 7777 --binlog packets.binlog
 ```
 
-# Run temporary test client:
+# Run UE-shaped handshake probe:
 ```
-./build/ue574_temp_client 127.0.0.1 7777
-```
-# Expected result:
-```
-temporary flow complete
+./build/ue574_probe_client 127.0.0.1 7777
 ```
 
 # Run with NanoS/ops:
@@ -29,8 +22,4 @@ temporary flow complete
 ops run ./build/ue574_endpoint -p 7777/udp
 ```
 
-# The important file is:
-```
-src/ue57_protocol.cpp
-```
-That is where the real UE5.7.4 wire compatibility goes. I deliberately separated the temporary harness from the future UE implementation so we can replace the fake UEHS / UECTL packets without rewriting the UDP server, session tracking, logging, NanoS path, or cookie machinery.
+The important caveat: this should now get us much closer to a real UE5.7.4 client’s first handshake, but the post-Ack control-channel layer is still not implemented.
