@@ -37,6 +37,7 @@ struct ControlReplyBuildInput {
   uint16_t next_out_reliable_ch0 = 0;
   uint8_t message_id = 0;
   std::string message_text;
+  std::vector<std::string> message_strings;
   NameWireMode name_mode = NameWireMode::OmitName;
 };
 

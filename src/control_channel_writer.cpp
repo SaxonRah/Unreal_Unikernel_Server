@@ -143,10 +143,23 @@ static void write_ue_fstring_ansi(BitWriter &w, const std::string &text) {
   w.write_u8(0);
 }
 
-static void write_control_payload_string_approx(BitWriter &w, uint8_t msg_id,
-                                                const std::string &text) {
-  w.write_u8(msg_id);
-  write_ue_fstring_ansi(w, text);
+static void write_control_message_payload(BitWriter &w,
+                                          const ControlReplyBuildInput &in) {
+  // DataChannel.h confirms UE5.7.4 control messages are:
+  //   NMT_Challenge = 3, params: FString
+  //   NMT_Welcome   = 1, params: FString LevelName, FString GameName, FString
+  //   RedirectURL
+  // TNetControlMessageImpl::Send serializes the uint8 message id first and
+  // then serializes each parameter with FArchive::operator<<.
+  w.write_u8(in.message_id);
+
+  if (!in.message_strings.empty()) {
+    for (const std::string &s : in.message_strings) {
+      write_ue_fstring_ansi(w, s);
+    }
+  } else {
+    write_ue_fstring_ansi(w, in.message_text);
+  }
 }
 
 std::vector<uint8_t>
@@ -161,8 +174,7 @@ build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
   write_packet_notify_header(normal, packet_seq, ack_seq);
 
   BitWriter bunch_payload;
-  write_control_payload_string_approx(bunch_payload, in.message_id,
-                                      in.message_text);
+  write_control_message_payload(bunch_payload, in);
 
   // UNetConnection::SendRawBunch header for reliable channel-0 control bunch.
   normal.write_bit(false);    // bIsOpenOrClose
@@ -218,7 +230,7 @@ build_experimental_nmt_challenge_candidates(const UEHandshake &response,
         NameWireMode::AnsiString, NameWireMode::LegacyChannelTypeControl}) {
     auto in = base_input(response, last_client_packet_seq);
     in.message_id = NMT_Challenge;
-    in.message_text = "00000000";
+    in.message_strings = {"00000000"};
     in.name_mode = mode;
     out.push_back(build_experimental_control_reply_packet(in));
   }
@@ -234,7 +246,8 @@ build_experimental_nmt_welcome_candidates(const UEHandshake &response,
         NameWireMode::AnsiString, NameWireMode::LegacyChannelTypeControl}) {
     auto in = base_input(response, last_client_packet_seq);
     in.message_id = NMT_Welcome;
-    in.message_text = "/Game/Maps/Minimal?game=/Script/Engine.GameModeBase";
+    in.message_strings = {"/Game/Maps/Minimal", "/Script/Engine.GameModeBase",
+                          ""};
     in.name_mode = mode;
     out.push_back(build_experimental_control_reply_packet(in));
   }
