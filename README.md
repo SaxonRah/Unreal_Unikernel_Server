@@ -6,6 +6,9 @@ In October 2016, I proposed on the Epic Developer Community Forums that an Unrea
 
 Tim Sweeney replied that the idea was "very interesting," but the concept was ahead of the tooling. IncludeOS required the application to be built specifically for its environment, and the UE4 dedicated server had a large dependency footprint: threading, complex file I/O, a substantial C/C++ runtime, networking, and broad POSIX-like behavior. At the time, running the full engine server this way was not realistic.
 
+https://forums.unrealengine.com/t/include-os-unreal-engine-as-an-unikernel-operating-system/75145
+https://web.archive.org/web/20250517204201/https://forums.unrealengine.com/t/include-os-unreal-engine-as-an-unikernel-operating-system/75145
+
 ### Why It Did Not Happen Then
 
 The original idea was to run the actual UE dedicated server as the unikernel payload. That meant porting or adapting a very large existing Linux-style server program to a minimal unikernel runtime.
