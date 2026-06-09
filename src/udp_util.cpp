@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 int udp_bind_any(uint16_t port) {

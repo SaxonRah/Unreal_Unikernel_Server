@@ -8,6 +8,7 @@ option(BUILD_STATIC "Build static ELF where supported" ON)
 
 add_library(ue574_common
     src/udp_util.cpp
+    src/bit_io.cpp
     src/crypto_sha1_hmac.cpp
     src/ue57_protocol.cpp
 )
@@ -18,6 +19,11 @@ add_executable(ue574_endpoint src/main.cpp)
 target_link_libraries(ue574_endpoint PRIVATE ue574_common)
 target_compile_options(ue574_endpoint PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
 
+
+add_executable(ue574_probe_client src/ue574_probe_client.cpp)
+target_link_libraries(ue574_probe_client PRIVATE ue574_common)
+target_compile_options(ue574_probe_client PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
+
 add_executable(ue574_temp_client src/temp_client.cpp)
 target_link_libraries(ue574_temp_client PRIVATE ue574_common)
 target_compile_options(ue574_temp_client PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
@@ -25,4 +31,5 @@ target_compile_options(ue574_temp_client PRIVATE -Wall -Wextra -Wpedantic -fno-e
 if(BUILD_STATIC)
     target_link_options(ue574_endpoint PRIVATE -static)
     target_link_options(ue574_temp_client PRIVATE -static)
+    target_link_options(ue574_probe_client PRIVATE -static)
 endif()

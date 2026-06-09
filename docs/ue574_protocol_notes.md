@@ -1,55 +1,79 @@
-# UE5.7.4 Protocol Implementation Notes
+# UE5.7.4 StatelessConnect Notes
 
-## Why this file exists
+This project is based on the uploaded UE5.7.4 files:
 
-Epic's public API docs identify the relevant classes and source paths, but the exact wire behavior must be derived from your licensed UE5.7.4 source tree and packet captures.
+- `StatelessConnectHandlerComponent.h`
+- `StatelessConnectHandlerComponent.cpp`
+- `PacketHandler.h`
+- `PacketHandler.cpp`
+- `NetConnection.h`
+- `NetConnection.cpp`
+- `DataChannel.cpp`
 
-The project should remain a clean-room implementation: use the source as a behavioral reference, do not paste Epic code.
-
-## Working hypothesis
-
-The first real milestone is:
-
-```text
-client real StatelessConnect initial packet
-server valid StatelessConnect challenge
-client challenge response
-server accepts and enters normal NetConnection/control-channel path
-```
-
-The second milestone is:
+## Handshake versions
 
 ```text
-NMT_Hello
-NMT_Challenge
-NMT_Login
-NMT_Welcome
+0 Original
+1 Randomized
+2 NetCLVersion
+3 SessionClientId
+4 NetCLUpgradeMessage / Latest
 ```
 
-## Do not overbuild yet
-
-Do not implement actor channels, NetGUIDs, replication, package map, or movement. The current proof is only "can a tiny non-UE ELF act like the first server endpoint long enough to welcome a client?"
-
-## Recommended capture setup
-
-```bash
-sudo tcpdump -i any udp port 7777 -w ue574-connect-attempt.pcap
-./build/ue574_endpoint --port 7777 --binlog packets.binlog
-```
-
-Then attempt:
+## Handshake packet types
 
 ```text
-open 127.0.0.1:7777
+0 Initial
+1 Challenge
+2 Response
+3 Ack
+4 RestartHandshake
+5 RestartResponse
+6 VersionUpgrade
 ```
 
-from a UE5.7.4 client or packaged test project.
+## Prefix for latest packets
 
-## Implementation order
+```text
+SessionID:          2 bits
+ClientID:           3 bits
+bHandshakePacket:   1 bit
+bRestartHandshake:  1 bit
+MinVersion:         8 bits
+CurVersion:         8 bits
+PacketType:         8 bits
+SentCount:          8 bits
+NetworkVersion:    32 bits
+NetworkFeatures:   16 bits
+```
 
-1. Identify the exact first-packet marker/fields from StatelessConnectHandlerComponent.
-2. Implement server challenge builder.
-3. Implement client challenge-response validator.
-4. Add just enough PacketHandler post-handshake framing to see control-channel open.
-5. Implement minimal control message reader/writer.
-6. Send NMT_Welcome.
+For Initial / Challenge / Response / Ack, the body then contains:
+
+```text
+SecretId:           1 bit
+Timestamp:         64 bits, double
+Cookie:           160 bits, 20 bytes
+RandomData:        64..128 bits
+TerminationBit:     1 bit
+```
+
+Initial uses `SecretId=0`, `Timestamp=0.0`, and a zero filler cookie-sized field.
+Challenge uses a positive timestamp and a 20-byte cookie.
+Response echoes the Challenge timestamp, secret id, and cookie.
+Ack uses a negative timestamp and echoes the accepted cookie.
+
+## Cookie note
+
+UE's server derives the 20-byte cookie from a rotating server secret and serialized
+client address/timestamp. The client does not need to know that algorithm; it only
+echoes the cookie. This standalone endpoint therefore uses its own HMAC and validates
+against itself.
+
+The cookie's first two int16 values matter because the UE client extracts initial
+packet sequence values from the accepted cookie after Ack. This implementation seeds
+those first four bytes deliberately instead of leaving them random.
+
+## Next layer
+
+Once Ack succeeds, normal NetConnection traffic begins. That is a separate protocol
+layer from StatelessConnect and must be implemented next.

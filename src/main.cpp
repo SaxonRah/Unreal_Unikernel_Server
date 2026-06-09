@@ -21,7 +21,18 @@ struct Session {
   ue574::SessionPhase phase = ue574::SessionPhase::CookieValidated;
   uint64_t created = 0;
   uint64_t last_seen = 0;
+  bool real_ue = false;
 };
+
+static void print_handshake_summary(const ue574::UEHandshake &h) {
+  printf("  UE handshake: type=%s(%u) min=%u cur=%u sent=%u session=%u "
+         "client=%u netver=%u features=0x%04x restart=%u ts=%.3f\n",
+         ue574::handshake_type_name(h.packet_type), (unsigned)h.packet_type,
+         (unsigned)h.remote_min_version, (unsigned)h.remote_cur_version,
+         (unsigned)h.remote_sent_count, (unsigned)h.session_id,
+         (unsigned)h.client_id, (unsigned)h.network_version,
+         (unsigned)h.network_features, h.restart ? 1u : 0u, h.timestamp);
+}
 
 int main(int argc, char **argv) {
   uint16_t port = 7777;
@@ -56,6 +67,7 @@ int main(int argc, char **argv) {
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
+  srand((unsigned)time(nullptr));
 
   int fd = udp_bind_any(port);
   if (fd < 0) {
@@ -64,9 +76,10 @@ int main(int argc, char **argv) {
 
   printf("UE5 5.7.4 NanoS endpoint starter listening on UDP/%u\n",
          (unsigned)port);
-  printf("mode: temporary harness + UE5.7.4 protocol seams\n");
-  printf("warning: not UE-wire-compatible until ue57_protocol.cpp TODOs are "
-         "replaced\n");
+  printf("mode: real StatelessConnect handshake attempt + temporary UECTL "
+         "smoke-test harness\n");
+  printf("note: after Ack, this still logs post-handshake packets; real "
+         "control-channel serialization is next\n");
 
   std::unordered_map<UdpClientKey, Session, UdpClientKeyHash> sessions;
   uint8_t buf[4096];
@@ -95,6 +108,39 @@ int main(int argc, char **argv) {
     ue574::ParsedPacket pp = ue574::parse_datagram(from, buf, (size_t)n);
 
     switch (pp.kind) {
+    case ue574::PacketKind::UEHandshakeInitial: {
+      print_handshake_summary(pp.handshake);
+      printf("  real UE5.7.4-ish: Initial -> Challenge\n");
+      auto out = ue574::build_ue574_challenge(from, pp.handshake);
+      udp_send_logged(fd, from, out.data(), out.size(), binlog);
+      break;
+    }
+
+    case ue574::PacketKind::UEHandshakeResponse: {
+      print_handshake_summary(pp.handshake);
+      bool ok = ue574::validate_ue574_response(from, pp.handshake);
+      printf("  real UE5.7.4-ish: Response cookie validation: %s\n",
+             ok ? "ok" : "FAIL");
+      if (!ok)
+        break;
+
+      sessions[ck] =
+          Session{ue574::SessionPhase::CookieValidated, ts, ts, true};
+
+      auto out = ue574::build_ue574_ack(pp.handshake);
+      udp_send_logged(fd, from, out.data(), out.size(), binlog);
+      printf("  sent Ack; next packets should be normal "
+             "NetConnection/control-channel data\n");
+      break;
+    }
+
+    case ue574::PacketKind::UEHandshakeOther: {
+      print_handshake_summary(pp.handshake);
+      printf("  recognized UE handshake packet but not Initial/Response; "
+             "ignoring for now\n");
+      break;
+    }
+
     case ue574::PacketKind::TempHandshakeInitial: {
       printf("  temp harness: initial -> challenge\n");
       auto out = ue574::build_temp_handshake_challenge(from);
@@ -108,7 +154,8 @@ int main(int argc, char **argv) {
       if (!ok)
         break;
 
-      sessions[ck] = Session{ue574::SessionPhase::CookieValidated, ts, ts};
+      sessions[ck] =
+          Session{ue574::SessionPhase::CookieValidated, ts, ts, false};
 
       auto out = ue574::build_temp_handshake_ok();
       udp_send_logged(fd, from, out.data(), out.size(), binlog);
@@ -147,12 +194,21 @@ int main(int argc, char **argv) {
       break;
     }
 
-    case ue574::PacketKind::ProbablyUEPacketHandlerDatagram:
-      printf("  looks like a possible UE PacketHandler datagram; TODO decode "
-             "UE5.7.4 bitstream\n");
-      printf("  next: compare against 5.7.4 "
-             "StatelessConnectHandlerComponent.cpp\n");
+    case ue574::PacketKind::ProbablyUEPostHandshakeDatagram: {
+      auto it = sessions.find(ck);
+      if (it != sessions.end()) {
+        it->second.last_seen = ts;
+        printf("  likely UE post-handshake datagram for validated session "
+               "phase=%s\n",
+               ue574::session_phase_name(it->second.phase));
+        printf("  TODO: decode UNetConnection packet header and "
+               "control-channel bunch\n");
+      } else {
+        printf(
+            "  likely UE binary datagram before local session is validated\n");
+      }
       break;
+    }
 
     case ue574::PacketKind::Unknown:
     default: {
