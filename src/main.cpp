@@ -1,4 +1,5 @@
 #include "control_channel_probe.h"
+#include "control_channel_writer.h"
 #include "udp_util.h"
 #include "ue57_protocol.h"
 
@@ -23,6 +24,10 @@ struct Session {
   uint64_t created = 0;
   uint64_t last_seen = 0;
   bool real_ue = false;
+  ue574::UEHandshake handshake{};
+  uint16_t server_sequence = 0;
+  uint16_t client_sequence = 0;
+  uint16_t last_client_packet_seq = 0;
 };
 
 static void print_handshake_summary(const ue574::UEHandshake &h) {
@@ -38,6 +43,7 @@ static void print_handshake_summary(const ue574::UEHandshake &h) {
 int main(int argc, char **argv) {
   uint16_t port = 7777;
   const char *binlog_path = nullptr;
+  bool experimental_control_replies = false;
 
   for (int i = 1; i < argc; ++i) {
     if (!strcmp(argv[i], "--port") && i + 1 < argc) {
@@ -49,8 +55,12 @@ int main(int argc, char **argv) {
       port = (uint16_t)p;
     } else if (!strcmp(argv[i], "--binlog") && i + 1 < argc) {
       binlog_path = argv[++i];
+    } else if (!strcmp(argv[i], "--experimental-control-replies")) {
+      experimental_control_replies = true;
     } else {
-      fprintf(stderr, "usage: %s [--port 7777] [--binlog packets.binlog]\n",
+      fprintf(stderr,
+              "usage: %s [--port 7777] [--binlog packets.binlog] "
+              "[--experimental-control-replies]\n",
               argv[0]);
       return 2;
     }
@@ -79,8 +89,10 @@ int main(int argc, char **argv) {
          (unsigned)port);
   printf("mode: real StatelessConnect handshake attempt + post-handshake "
          "control-channel probe\n");
-  printf("note: after Ack, this now scans likely control-channel bunches; "
-         "server replies are still experimental/TODO\n");
+  printf("note: after Ack, this scans likely control-channel bunches; optional "
+         "experimental replies need PackageMap/CoreNet verification\n");
+  printf("experimental control replies: %s\n",
+         experimental_control_replies ? "enabled" : "disabled");
 
   std::unordered_map<UdpClientKey, Session, UdpClientKeyHash> sessions;
   uint8_t buf[4096];
@@ -125,8 +137,18 @@ int main(int argc, char **argv) {
       if (!ok)
         break;
 
-      sessions[ck] =
-          Session{ue574::SessionPhase::CookieValidated, ts, ts, true};
+      Session sess{};
+      sess.phase = ue574::SessionPhase::CookieValidated;
+      sess.created = ts;
+      sess.last_seen = ts;
+      sess.real_ue = true;
+      sess.handshake = pp.handshake;
+      ue574::extract_sequences_from_cookie(pp.handshake, sess.server_sequence,
+                                           sess.client_sequence);
+      sess.last_client_packet_seq = sess.client_sequence;
+      sessions[ck] = sess;
+      printf("  sequence seeds: server=%u client=%u\n",
+             (unsigned)sess.server_sequence, (unsigned)sess.client_sequence);
 
       auto out = ue574::build_ue574_ack(pp.handshake);
       udp_send_logged(fd, from, out.data(), out.size(), binlog);
@@ -155,8 +177,12 @@ int main(int argc, char **argv) {
       if (!ok)
         break;
 
-      sessions[ck] =
-          Session{ue574::SessionPhase::CookieValidated, ts, ts, false};
+      Session sess{};
+      sess.phase = ue574::SessionPhase::CookieValidated;
+      sess.created = ts;
+      sess.last_seen = ts;
+      sess.real_ue = false;
+      sessions[ck] = sess;
 
       auto out = ue574::build_temp_handshake_ok();
       udp_send_logged(fd, from, out.data(), out.size(), binlog);
@@ -202,19 +228,50 @@ int main(int argc, char **argv) {
         printf("  likely UE post-handshake datagram for validated session "
                "phase=%s\n",
                ue574::session_phase_name(it->second.phase));
+        ue574::PacketNotifyHeaderMini pn =
+            ue574::parse_packet_notify_after_stateless_prefix(buf, (size_t)n);
+        if (pn.ok) {
+          it->second.last_client_packet_seq = pn.seq;
+          printf("  packet notify: seq=%u acked=%u history_words=%u bits=%u\n",
+                 (unsigned)pn.seq, (unsigned)pn.acked_seq,
+                 (unsigned)pn.history_word_count, (unsigned)pn.bits_consumed);
+        }
+
         ue574::PostHandshakeProbeReport report =
             ue574::probe_post_handshake_packet(buf, (size_t)n);
         printf("%s", ue574::format_post_handshake_report(report).c_str());
         for (const auto &cand : report.candidates) {
           if (cand.plausible && cand.first_payload_byte == ue574::NMT_Hello) {
             it->second.phase = ue574::SessionPhase::SawHello;
-            printf("  observed likely NMT_Hello; next implementation target is "
-                   "packet header writer + NMT_Challenge bunch\n");
+            printf("  observed likely NMT_Hello; experimental next step is "
+                   "NMT_Challenge bunch\n");
+            if (experimental_control_replies && it->second.real_ue) {
+              auto outs = ue574::build_experimental_nmt_challenge_candidates(
+                  it->second.handshake, it->second.last_client_packet_seq);
+              for (size_t oi = 0; oi < outs.size(); ++oi) {
+                printf("  sending experimental NMT_Challenge candidate %zu/%zu "
+                       "(%zu bytes)\n",
+                       oi + 1, outs.size(), outs[oi].size());
+                udp_send_logged(fd, from, outs[oi].data(), outs[oi].size(),
+                                binlog);
+              }
+            }
             break;
           }
           if (cand.plausible && cand.first_payload_byte == ue574::NMT_Login) {
-            printf("  observed likely NMT_Login; next implementation target is "
+            printf("  observed likely NMT_Login; experimental next step is "
                    "NMT_Welcome bunch\n");
+            if (experimental_control_replies && it->second.real_ue) {
+              auto outs = ue574::build_experimental_nmt_welcome_candidates(
+                  it->second.handshake, it->second.last_client_packet_seq);
+              for (size_t oi = 0; oi < outs.size(); ++oi) {
+                printf("  sending experimental NMT_Welcome candidate %zu/%zu "
+                       "(%zu bytes)\n",
+                       oi + 1, outs.size(), outs[oi].size());
+                udp_send_logged(fd, from, outs[oi].data(), outs[oi].size(),
+                                binlog);
+              }
+            }
             break;
           }
         }

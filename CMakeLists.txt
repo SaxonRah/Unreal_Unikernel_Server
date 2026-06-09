@@ -12,6 +12,7 @@ add_library(ue574_common
     src/crypto_sha1_hmac.cpp
     src/ue57_protocol.cpp
     src/control_channel_probe.cpp
+    src/control_channel_writer.cpp
 )
 
 target_compile_options(ue574_common PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)

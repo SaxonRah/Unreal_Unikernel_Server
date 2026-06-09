@@ -32,6 +32,40 @@ void BitWriter::write_u16(uint16_t v) { write_bits_u64(v, 16); }
 
 void BitWriter::write_u32(uint32_t v) { write_bits_u64(v, 32); }
 
+static uint32_t ceil_log2_local(uint32_t max_value) {
+  uint32_t v = max_value > 0 ? max_value - 1 : 0;
+  uint32_t bits = 0;
+  while (v > 0) {
+    ++bits;
+    v >>= 1;
+  }
+  return bits;
+}
+
+void BitWriter::write_int_wrapped(uint32_t value, uint32_t max_value) {
+  write_bits_u64(value, ceil_log2_local(max_value));
+}
+
+void BitWriter::write_int_packed(uint32_t value) {
+  // Matches the small-value shape used by UE SerializeIntPacked: 7 data
+  // bits then a continuation bit. Channel 0 encodes as one zero byte.
+  do {
+    uint8_t low7 = (uint8_t)(value & 0x7fu);
+    value >>= 7;
+    write_bits_u64(low7, 7);
+    write_bit(value != 0);
+  } while (value != 0);
+}
+
+void BitWriter::append_bits(const BitWriter &other) {
+  BitReader r(other.bytes().data(), other.bytes().size());
+  for (uint32_t i = 0; i < other.bit_count(); ++i) {
+    bool b = false;
+    r.read_bit(b);
+    write_bit(b);
+  }
+}
+
 void BitWriter::write_double(double v) {
   uint64_t raw = 0;
   static_assert(sizeof(raw) == sizeof(v), "unexpected double size");
@@ -119,6 +153,34 @@ bool BitReader::read_u32(uint32_t &out) {
   }
   out = (uint32_t)v;
   return true;
+}
+
+bool BitReader::read_int_wrapped(uint32_t max_value, uint32_t &out) {
+  uint64_t tmp = 0;
+  if (!read_bits_u64(ceil_log2_local(max_value), tmp)) {
+    out = 0;
+    return false;
+  }
+  out = (uint32_t)tmp;
+  return true;
+}
+
+bool BitReader::read_int_packed(uint32_t &out) {
+  out = 0;
+  uint32_t shift = 0;
+  for (int group = 0; group < 5; ++group) {
+    uint64_t low7 = 0;
+    if (!read_bits_u64(7, low7))
+      return false;
+    bool more = false;
+    if (!read_bit(more))
+      return false;
+    out |= (uint32_t)(low7 << shift);
+    if (!more)
+      return true;
+    shift += 7;
+  }
+  return false;
 }
 
 bool BitReader::read_double(double &out) {

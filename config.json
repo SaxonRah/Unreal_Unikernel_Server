@@ -1,5 +1,7 @@
 {
   "RunConfig": {
-    "Ports": ["7777/udp"]
+    "Ports": [
+      "7777/udp"
+    ]
   }
 }
