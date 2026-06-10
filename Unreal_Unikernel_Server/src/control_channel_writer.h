@@ -64,6 +64,14 @@ enum class ActorPayloadProbeMode : uint8_t {
   ExportCount0ThenGuid2 = 15,
   ExportGuid2ActorPathThenGuid2 = 16,
   ExportGuid2ClassPathThenGuid2 = 17,
+
+  // v46: source-guided SerializeNewActor shape. Instead of putting a fake
+  // path blob in front of the actor GUID, build the same rough structure as
+  // UPackageMapClient::SerializeNewActor for a dynamic actor: NetGUID actor,
+  // archetype object ref, optional level ref, and empty initial transform bits.
+  // The archetype is exported through the PackageMap export prefix with its
+  // recursive outer chain: package -> class -> Default__Class_CDO.
+  SerializeNewActorPlayerControllerCDO = 18,
 };
 
 enum class NameWireMode : uint8_t {
@@ -121,6 +129,13 @@ build_experimental_ack_only_packet(const UEHandshake &response,
                                    uint16_t last_client_packet_seq,
                                    uint16_t next_server_packet_seq);
 std::vector<uint8_t> build_experimental_empty_actor_channel_open_probe(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t actor_channel_index,
+    uint16_t next_out_reliable_actor_ch,
+    ActorChannelNameWireMode actor_name_mode,
+    ActorPayloadProbeMode payload_mode = ActorPayloadProbeMode::Empty,
+    const std::string &actor_class_path_hint = std::string());
+std::vector<uint8_t> build_experimental_actor_channel_content_probe(
     const UEHandshake &response, uint16_t last_client_packet_seq,
     uint16_t next_server_packet_seq, uint16_t actor_channel_index,
     uint16_t next_out_reliable_actor_ch,

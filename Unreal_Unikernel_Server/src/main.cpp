@@ -51,6 +51,10 @@ struct Session {
   uint16_t last_actor_probe_packet_seq = 0;
   bool actor_probe_packet_acked = false;
   bool announced_actor_probe_packet_acked = false;
+  bool sent_actor_followup_probe = false;
+  uint16_t last_actor_followup_packet_seq = 0;
+  bool actor_followup_packet_acked = false;
+  bool announced_actor_followup_packet_acked = false;
   bool saw_actor_channel_failure = false;
   uint16_t first_actor_channel_failure_seq = 0;
   bool saw_actor_probe_late_pressure = false;
@@ -179,11 +183,13 @@ int main(int argc, char **argv) {
       "replication is not implemented yet.";
   bool post_join_empty_actor_probe = false;
   uint32_t post_join_actor_probe_after = 1;
-  uint16_t post_join_actor_channel = 2;
+  uint16_t post_join_actor_channel = 3;
   ue574::ActorChannelNameWireMode post_join_actor_name_mode =
-      ue574::ActorChannelNameWireMode::LegacyChannelTypeActor;
+      ue574::ActorChannelNameWireMode::StaticSerializeNameStringActor;
   ue574::ActorPayloadProbeMode post_join_actor_payload_mode =
       ue574::ActorPayloadProbeMode::Empty;
+  bool post_join_actor_followup_probe = false;
+  uint32_t post_join_actor_followup_after = 2;
 
   for (int i = 1; i < argc; ++i) {
     if (!strcmp(argv[i], "--port") && i + 1 < argc) {
@@ -256,6 +262,17 @@ int main(int argc, char **argv) {
         return 2;
       }
       post_join_actor_channel = (uint16_t)v;
+    } else if (!strcmp(argv[i], "--post-join-actor-followup-probe")) {
+      post_join_actor_followup_probe = true;
+    } else if (!strcmp(argv[i], "--post-join-actor-followup-after") &&
+               i + 1 < argc) {
+      long v = strtol(argv[++i], nullptr, 10);
+      if (v < 0 || v > 1000000) {
+        fprintf(stderr, "bad --post-join-actor-followup-after; use a "
+                        "non-negative post-Welcome packet count\n");
+        return 2;
+      }
+      post_join_actor_followup_after = (uint32_t)v;
     } else if (!strcmp(argv[i], "--post-join-actor-name-mode") &&
                i + 1 < argc) {
       const char *mode = argv[++i];
@@ -347,6 +364,10 @@ int main(int argc, char **argv) {
                  !strcmp(mode, "export-class-path")) {
         post_join_actor_payload_mode =
             ue574::ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2;
+      } else if (!strcmp(mode, "serialize-newactor-pc-cdo") ||
+                 !strcmp(mode, "realish-newactor")) {
+        post_join_actor_payload_mode =
+            ue574::ActorPayloadProbeMode::SerializeNewActorPlayerControllerCDO;
       } else {
         fprintf(stderr,
                 "bad --post-join-actor-payload-mode; use empty, zero8, zero32, "
@@ -354,8 +375,8 @@ int main(int argc, char **argv) {
                 "dynamic-guid2, dynamic-guid2-class0, dynamic-guid2-class1, "
                 "dynamic-guid2-class3, dynamic-guid2-content-empty, "
                 "mustmap-none-guid2, mustmap-guid2, mustmap-guid2-guid4, "
-                "export-count0-guid2, export-guid2-actor-path, or "
-                "export-guid2-class-path\n");
+                "export-count0-guid2, export-guid2-actor-path, "
+                "export-guid2-class-path, or serialize-newactor-pc-cdo\n");
         return 2;
       }
     } else {
@@ -369,13 +390,14 @@ int main(int argc, char **argv) {
           "[--post-welcome-max-ack-only N] [--post-welcome-failure-after N] "
           "[--post-welcome-failure-text TEXT] [--post-join-empty-actor-probe] "
           "[--post-join-actor-probe-after N] [--post-join-actor-channel N] "
-          "[--post-join-actor-name-mode legacy|string] "
-          "[--post-join-actor-payload-mode "
+          "[--post-join-actor-followup-probe] "
+          "[--post-join-actor-followup-after N] [--post-join-actor-name-mode "
+          "legacy|string] [--post-join-actor-payload-mode "
           "empty|zero8|zero32|netguid0|netguid1|netguid1-class0|netguid1-"
           "class1|dynamic-guid2|dynamic-guid2-class0|dynamic-guid2-class1|"
           "dynamic-guid2-class3|dynamic-guid2-content-empty|mustmap-none-guid2|"
           "mustmap-guid2|mustmap-guid2-guid4|export-count0-guid2|export-guid2-"
-          "actor-path|export-guid2-class-path]\n",
+          "actor-path|export-guid2-class-path|serialize-newactor-pc-cdo]\n",
           argv[0]);
       return 2;
     }
@@ -422,6 +444,11 @@ int main(int argc, char **argv) {
            (unsigned)post_join_actor_probe_after,
            ue574::actor_channel_name_wire_mode_name(post_join_actor_name_mode),
            ue574::actor_payload_probe_mode_name(post_join_actor_payload_mode));
+    if (post_join_actor_followup_probe) {
+      printf("post-Join actor follow-up content probe: enabled after %u "
+             "post-Welcome client packet(s), same channel/payload mode\n",
+             (unsigned)post_join_actor_followup_after);
+    }
   }
   printf("experimental control replies: %s\n",
          experimental_control_replies ? "enabled" : "disabled");
@@ -792,6 +819,26 @@ int main(int argc, char **argv) {
                  "type\n");
         }
 
+        if (it->second.sent_actor_followup_probe &&
+            !it->second.actor_followup_packet_acked &&
+            it->second.last_actor_followup_packet_seq != 0 &&
+            pn.acked_seq >= it->second.last_actor_followup_packet_seq) {
+          it->second.actor_followup_packet_acked = true;
+        }
+
+        if (it->second.actor_followup_packet_acked &&
+            !it->second.announced_actor_followup_packet_acked) {
+          it->second.announced_actor_followup_packet_acked = true;
+          printf("  actor follow-up content packet was ACKed by client (server "
+                 "seq=%u, client acked=%u); content bunch envelope reached UE "
+                 "processing\n",
+                 (unsigned)it->second.last_actor_followup_packet_seq,
+                 (unsigned)pn.acked_seq);
+          printf("  if late pressure still follows, next blocker is real "
+                 "PackageMap/SerializeNewActor data, not open-vs-content "
+                 "timing\n");
+        }
+
         bool saw_real_login_payload =
             looks_like_real_login_payload(buf, (size_t)n);
 
@@ -1074,6 +1121,55 @@ int main(int argc, char **argv) {
           sent_server_packet_this_rx = true;
         }
 
+        // Optional v45 probe: after the actor-channel open has been ACKed,
+        // send a second reliable actor-channel content bunch on the same
+        // channel. This tests whether the pending client is waiting for
+        // follow-up actor content after the open bunch, versus requiring a
+        // complete SerializeNewActor payload in the open bunch itself.
+        if (experimental_control_replies && post_join_actor_followup_probe &&
+            it->second.real_ue &&
+            it->second.phase == ue574::SessionPhase::Welcomed &&
+            it->second.sent_empty_actor_probe &&
+            it->second.actor_probe_packet_acked &&
+            !it->second.sent_actor_followup_probe &&
+            !sent_server_packet_this_rx && pn.ok &&
+            it->second.post_welcome_client_packets >=
+                post_join_actor_followup_after &&
+            pn.acked_seq >= it->second.last_actor_probe_packet_seq) {
+
+          auto out = ue574::build_experimental_actor_channel_content_probe(
+              it->second.handshake, it->second.last_client_packet_seq,
+              it->second.next_server_packet_seq, post_join_actor_channel,
+              it->second.next_out_reliable_actor, post_join_actor_name_mode,
+              post_join_actor_payload_mode,
+              planned_player_controller_class.empty()
+                  ? std::string("/Script/Engine.PlayerController")
+                  : planned_player_controller_class);
+          printf("  sending experimental Actor-channel follow-up content probe "
+                 "(%zu bytes seq=%u ch=%u chseq=%u ack_client=%u name-mode=%s "
+                 "payload-mode=%s)\n",
+                 out.size(), (unsigned)it->second.next_server_packet_seq,
+                 (unsigned)post_join_actor_channel,
+                 (unsigned)it->second.next_out_reliable_actor,
+                 (unsigned)it->second.last_client_packet_seq,
+                 ue574::actor_channel_name_wire_mode_name(
+                     post_join_actor_name_mode),
+                 ue574::actor_payload_probe_mode_name(
+                     post_join_actor_payload_mode));
+          printf(
+              "  actor follow-up note: second reliable actor bunch after open; "
+              "diagnostic only, still not real PlayerController replication\n");
+          udp_send_logged(fd, from, out.data(), out.size(), binlog);
+          it->second.last_actor_followup_packet_seq =
+              it->second.next_server_packet_seq;
+          it->second.next_server_packet_seq =
+              (uint16_t)((it->second.next_server_packet_seq + 1) & 0x3fff);
+          it->second.next_out_reliable_actor =
+              (uint16_t)((it->second.next_out_reliable_actor + 1) & 1023);
+          it->second.sent_actor_followup_probe = true;
+          sent_server_packet_this_rx = true;
+        }
+
         // Optional v33 diagnostic: once NetSpeed is proven and the client has
         // sent a few post-Welcome packets without a decodable Join/actor path,
         // send a real reliable control-channel NMT_Failure. This is
@@ -1199,8 +1295,9 @@ int main(int argc, char **argv) {
     const Session &sess = kv.second;
     printf("  phase=%s server_next=%u last_client_seq=%u client_acked=%u "
            "ack_only_sent=%u NetSpeed=%s Join=%s ActorProbe=%s ActorAck=%s "
-           "ActorChannelFailure=%s ActorLatePressure=%s BunchWrongType=%s "
-           "Failure=%s FailureReceived=%s lateDirectLogin=%s\n",
+           "ActorFollowup=%s ActorFollowupAck=%s ActorChannelFailure=%s "
+           "ActorLatePressure=%s BunchWrongType=%s Failure=%s "
+           "FailureReceived=%s lateDirectLogin=%s\n",
            ue574::session_phase_name(sess.phase),
            (unsigned)sess.next_server_packet_seq,
            (unsigned)sess.max_client_seq_seen,
@@ -1210,6 +1307,8 @@ int main(int argc, char **argv) {
            sess.saw_exact_join ? "yes" : "no",
            sess.sent_empty_actor_probe ? "yes" : "no",
            sess.actor_probe_packet_acked ? "yes" : "no",
+           sess.sent_actor_followup_probe ? "yes" : "no",
+           sess.actor_followup_packet_acked ? "yes" : "no",
            sess.saw_actor_channel_failure ? "yes" : "no",
            sess.saw_actor_probe_late_pressure ? "yes" : "no",
            sess.saw_bunch_wrong_channel_type ? "yes" : "no",

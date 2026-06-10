@@ -6,6 +6,8 @@
 
 namespace ue574 {
 
+static void write_ue_fstring_ansi(BitWriter &w, const std::string &text);
+
 static constexpr uint32_t PacketNotifySeqBits = 14;
 static constexpr uint32_t PacketNotifyHistoryWordCountBits = 4;
 static constexpr uint32_t MaxPacketId = 1u << PacketNotifySeqBits;
@@ -62,8 +64,226 @@ const char *actor_payload_probe_mode_name(ActorPayloadProbeMode mode) {
     return "export-guid2-actor-path";
   case ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2:
     return "export-guid2-class-path";
+  case ActorPayloadProbeMode::SerializeNewActorPlayerControllerCDO:
+    return "serialize-newactor-pc-cdo";
   }
   return "?";
+}
+
+static std::string basename_after_slash(const std::string &s) {
+  size_t p = s.find_last_of('/');
+  if (p == std::string::npos)
+    return s;
+  return s.substr(p + 1);
+}
+
+struct ObjectPathParts {
+  std::string package_path;
+  std::string object_name;
+};
+
+static ObjectPathParts split_class_path_hint(const std::string &hint) {
+  // Accept either full generated-class style:
+  //   /Game/Foo/FooBP.FooBP_C
+  // or asset-package shorthand:
+  //   /Game/Foo/FooBP
+  // and default to an engine class if empty.
+  const std::string path =
+      hint.empty() ? std::string("/Script/Engine.PlayerController") : hint;
+  size_t dot = path.find_last_of('.');
+  if (dot != std::string::npos) {
+    return {path.substr(0, dot), path.substr(dot + 1)};
+  }
+  std::string base = basename_after_slash(path);
+  if (path.rfind("/Script/", 0) == 0) {
+    return {path, base};
+  }
+  // Blueprint asset shorthand: generated class normally has _C suffix.
+  return {path, base + "_C"};
+}
+
+static void write_packed_netguid(BitWriter &w, uint64_t guid) {
+  // Our test GUIDs are small, so the existing uint32 packed-int writer is
+  // sufficient for FNetworkGUID::ObjectId here. Do not use this for large ids.
+  w.write_int_packed(static_cast<uint32_t>(guid));
+}
+
+static void write_exported_object_ref(BitWriter &w, uint64_t netguid,
+                                      const std::string &object_name,
+                                      uint64_t outer_guid,
+                                      const std::string &outer_object_name,
+                                      uint64_t outer_outer_guid,
+                                      const std::string &outer_outer_name,
+                                      bool no_load = false) {
+  // This mirrors UPackageMapClient::InternalWriteObject while
+  // GuidCache->IsExportingNetGUIDBunch is true:
+  //   FNetworkGUID (SerializeIntPacked64)
+  //   FExportFlags byte (bit0 has path, bit1 no-load, bit2 checksum)
+  //   recursive outer object reference
+  //   FString object name
+  // Network checksum flag is deliberately false to avoid checksum
+  // payload/version assumptions.
+  write_packed_netguid(w, static_cast<uint32_t>(netguid));
+  uint8_t flags =
+      0x01 | (no_load ? 0x02 : 0x00); // bHasPath, optional bNoLoad, no checksum
+  w.write_u8(flags);
+
+  if (outer_guid != 0) {
+    write_packed_netguid(w, static_cast<uint32_t>(outer_guid));
+    w.write_u8(0x01); // outer has path
+    if (outer_outer_guid != 0) {
+      write_packed_netguid(w, static_cast<uint32_t>(outer_outer_guid));
+      w.write_u8(0x01);
+      write_packed_netguid(w, 0); // package outer is null
+      write_ue_fstring_ansi(w, outer_outer_name);
+    } else {
+      write_packed_netguid(w, 0);
+    }
+    write_ue_fstring_ansi(w, outer_object_name);
+  } else {
+    write_packed_netguid(w, 0);
+  }
+
+  write_ue_fstring_ansi(w, object_name);
+}
+
+static void write_export_bunch_header_count(BitWriter &w, uint32_t count) {
+  // ReceiveNetGUIDBunch: bHasRepLayoutExport bit, then `InBunch << int32
+  // NumGUIDsInBunch`. This is raw int32 archive serialization, not
+  // SerializeIntPacked.
+  w.write_bit(false);
+  w.write_u32(count);
+}
+
+static void write_serialize_new_actor_dynamic_pc_cdo(
+    BitWriter &actor_payload, const std::string &actor_class_path_hint) {
+  ObjectPathParts cls = split_class_path_hint(actor_class_path_hint);
+  const std::string cdo_name = std::string("Default__") + cls.object_name;
+
+  // Chosen test GUIDs:
+  //   2 = dynamic actor GUID (even = dynamic)
+  //   3 = static package GUID (/Script/Engine or /Game/AssetPackage)
+  //   5 = static generated/native class GUID
+  //   7 = static archetype/CDO GUID
+  // Export one top-level archetype object; InternalLoadObject recursively reads
+  // the class and package outers.
+  write_export_bunch_header_count(actor_payload, 1);
+  write_exported_object_ref(actor_payload, 7, cdo_name, 5, cls.object_name, 3,
+                            cls.package_path, false);
+
+  // UPackageMapClient::SerializeNewActor loading path:
+  //   NET_CHECKSUM (normally no-op)
+  //   SerializeObject(AActor::StaticClass(), Actor, &ActorNetGUID) -> actor
+  //   dynamic NetGUID only SerializeObject(UObject::StaticClass(), Archetype,
+  //   &ArchetypeNetGUID) -> exported CDO GUID
+  //   SerializeObject(ULevel::StaticClass(), ActorLevel) for
+  //   NewActorOverrideLevel-era clients -> null/persistent compressed initial
+  //   transform bits: Location, Rotation, Scale, Velocity all false/default.
+  write_packed_netguid(actor_payload, 2); // actor dynamic GUID
+  write_packed_netguid(actor_payload, 7); // archetype/CDO static GUID
+  write_packed_netguid(actor_payload,
+                       0);        // no override level -> persistent level
+  actor_payload.write_bit(false); // no Location
+  actor_payload.write_bit(false); // no Rotation
+  actor_payload.write_bit(false); // no Scale
+  actor_payload.write_bit(false); // no Velocity
+}
+
+static void
+write_actor_payload_probe_bits(BitWriter &actor_payload,
+                               ActorPayloadProbeMode payload_mode,
+                               const std::string &actor_class_path_hint) {
+  auto write_export_prefix_count0 = [&]() {
+    actor_payload.write_int_packed(0);
+  };
+  auto write_export_prefix_one_path = [&](uint32_t guid_value,
+                                          const std::string &path) {
+    actor_payload.write_int_packed(1);
+    actor_payload.write_int_packed(guid_value);
+    actor_payload.write_int_packed(0);
+    write_ue_fstring_ansi(actor_payload, path);
+    actor_payload.write_int_packed(0);
+  };
+
+  switch (payload_mode) {
+  case ActorPayloadProbeMode::Empty:
+    break;
+  case ActorPayloadProbeMode::ZeroByte:
+    actor_payload.write_u8(0);
+    break;
+  case ActorPayloadProbeMode::FourZeroBytes:
+    actor_payload.write_u32(0);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidZero:
+    actor_payload.write_int_packed(0);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidOne:
+    actor_payload.write_int_packed(1);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidOneClassZero:
+    actor_payload.write_int_packed(1);
+    actor_payload.write_int_packed(0);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidOneClassOne:
+    actor_payload.write_int_packed(1);
+    actor_payload.write_int_packed(1);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2:
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2Class0:
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(0);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2Class1:
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(1);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2Class3:
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(3);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2ContentEmpty:
+    actor_payload.write_int_packed(2);
+    actor_payload.write_bit(false);
+    actor_payload.write_bit(true);
+    actor_payload.write_int_packed(0);
+    break;
+  case ActorPayloadProbeMode::MustMapNoneThenGuid2:
+    actor_payload.write_u16(0);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::MustMapGuid2ThenGuid2:
+    actor_payload.write_u16(1);
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::MustMapGuid2Guid4ThenGuid2:
+    actor_payload.write_u16(2);
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(4);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::ExportCount0ThenGuid2:
+    write_export_prefix_count0();
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::ExportGuid2ActorPathThenGuid2:
+    write_export_prefix_one_path(2, "/Script/Engine.Actor");
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2:
+    write_export_prefix_one_path(
+        2, actor_class_path_hint.empty()
+               ? std::string("/Script/Engine.PlayerController")
+               : actor_class_path_hint);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::SerializeNewActorPlayerControllerCDO:
+    write_serialize_new_actor_dynamic_pc_cdo(actor_payload,
+                                             actor_class_path_hint);
+    break;
+  }
 }
 
 const char *name_wire_mode_name(NameWireMode mode) {
@@ -163,9 +383,18 @@ static void write_packet_notify_header(BitWriter &w, uint16_t seq,
   // FNetPacketNotify::WriteHeader packs:
   //   seq:14 | acked:14 | history_words_minus_one:4
   // and always writes at least one history word.
-  // Important: TSequenceHistory bit 0 corresponds to the current AckedSeq
-  // when AckCount == 1 on the receiver. A zero word NAKs the client packet
-  // we just processed; bit0=1 ACKs it.
+  // Important: TSequenceHistory bit 0 corresponds to the current AckedSeq.
+  // Earlier builds wrote only bit0=1. That correctly ACKed the newest client
+  // packet, but it NAKed every previous packet in the advertised history
+  // window once AckedSeq advanced by more than one. The UE client log showed
+  // this clearly after map travel: when we ACKed client seq 90, the client
+  // logged seq 83-89 as NAK and only seq 90 as ACK.
+  //
+  // This endpoint receives client packets sequentially and does not maintain
+  // a sparse drop history yet, so advertise the whole 32-packet window as
+  // delivered. This is closer to a no-loss local test path and prevents the
+  // client from resending world/level-visibility traffic just because our
+  // ACK history lied.
   uint32_t packed = 0;
   packed |= (uint32_t(seq) & (MaxPacketId - 1))
             << (PacketNotifyHistoryWordCountBits + PacketNotifySeqBits);
@@ -173,7 +402,8 @@ static void write_packet_notify_header(BitWriter &w, uint16_t seq,
             << PacketNotifyHistoryWordCountBits;
   packed |= 0; // one history word => count-minus-one 0
   w.write_u32(packed);
-  w.write_u32(1); // ack history bit0=1 => AckedSeq itself was delivered
+  w.write_u32(
+      0xffffffffu); // ACK AckedSeq and the prior 31 packets in the history word
 }
 
 static void write_i32(BitWriter &w, int32_t v) { w.write_u32((uint32_t)v); }
@@ -334,7 +564,9 @@ std::vector<uint8_t> build_experimental_empty_actor_channel_open_probe(
   const bool has_package_map_exports =
       payload_mode == ActorPayloadProbeMode::ExportCount0ThenGuid2 ||
       payload_mode == ActorPayloadProbeMode::ExportGuid2ActorPathThenGuid2 ||
-      payload_mode == ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2;
+      payload_mode == ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2 ||
+      payload_mode ==
+          ActorPayloadProbeMode::SerializeNewActorPlayerControllerCDO;
   normal.write_bit(has_package_map_exports); // bHasPackageMapExports
   normal.write_bit(has_must_map_prefix);     // bHasMustBeMappedGUIDs
   normal.write_bit(false);                   // bPartial
@@ -354,130 +586,66 @@ std::vector<uint8_t> build_experimental_empty_actor_channel_open_probe(
   // Build the actor-bunch payload into its own bitstream first so the bunch
   // header can write the exact payload bit count.
   BitWriter actor_payload;
+  write_actor_payload_probe_bits(actor_payload, payload_mode,
+                                 actor_class_path_hint);
 
-  auto write_export_prefix_count0 = [&]() {
-    // Diagnostic PackageMap export boundary probe. The exact
-    // UPackageMapClient export format lives outside the uploaded source, so
-    // this starts with the most likely compact-count boundary. If the client
-    // reacts differently than the non-export modes, bHasPackageMapExports is
-    // reaching ReceiveNetGUIDBunch before SerializeNewActor.
-    actor_payload.write_int_packed(0);
-  };
-  auto write_export_prefix_one_path = [&](uint32_t guid_value,
-                                          const std::string &path) {
-    // Speculative one-export shape: count, GUID, outer GUID, path string,
-    // checksum/flags placeholder. This is not a real PackageMap exporter
-    // yet; it is a boundary probe to test whether path-bearing export data
-    // changes client behavior versus bare GUID payloads.
-    actor_payload.write_int_packed(1);
-    actor_payload.write_int_packed(guid_value);
-    actor_payload.write_int_packed(0);
-    write_ue_fstring_ansi(actor_payload, path);
-    actor_payload.write_int_packed(0);
-  };
+  normal.write_int_wrapped(actor_payload.bit_count(), 1024 * 8);
+  normal.append_bits(actor_payload);
 
-  switch (payload_mode) {
-  case ActorPayloadProbeMode::Empty:
-    break;
-  case ActorPayloadProbeMode::ZeroByte:
-    actor_payload.write_u8(0);
-    break;
-  case ActorPayloadProbeMode::FourZeroBytes:
-    actor_payload.write_u32(0);
-    break;
-  case ActorPayloadProbeMode::PackedNetGuidZero:
-    // Likely first SerializeObject/SerializeNewActor field: an actor
-    // FNetworkGUID serialized as packed int. Zero is an invalid/null
-    // object probe. If the client responds with object/guid failure,
-    // we know this boundary is plausible.
-    actor_payload.write_int_packed(0);
-    break;
-  case ActorPayloadProbeMode::PackedNetGuidOne:
-    // Minimal non-zero actor NetGUID probe. Not enough to spawn, but
-    // enough to distinguish empty-payload timeout from NetGUID parsing.
-    actor_payload.write_int_packed(1);
-    break;
-  case ActorPayloadProbeMode::PackedNetGuidOneClassZero:
-    // Actor NetGUID + null class/object GUID probe. This approximates
-    // the next SerializeObject boundary without path exports.
-    actor_payload.write_int_packed(1);
-    actor_payload.write_int_packed(0);
-    break;
-  case ActorPayloadProbeMode::PackedNetGuidOneClassOne:
-    // Actor NetGUID + non-zero class/object GUID probe. Still no path
-    // exports, so a clean NetGUID/object-resolution failure is expected.
-    actor_payload.write_int_packed(1);
-    actor_payload.write_int_packed(1);
-    break;
-  case ActorPayloadProbeMode::DynamicActorGuid2:
-    // FNetworkGUID value layout: low bit is static flag, upper bits are index.
-    // Value 2 => dynamic GUID with index 1, a better approximation for a newly
-    // spawned replicated actor than odd/static value 1.
-    actor_payload.write_int_packed(2);
-    break;
-  case ActorPayloadProbeMode::DynamicActorGuid2Class0:
-    actor_payload.write_int_packed(2); // dynamic actor GUID
-    actor_payload.write_int_packed(0); // null/default class/archetype probe
-    break;
-  case ActorPayloadProbeMode::DynamicActorGuid2Class1:
-    actor_payload.write_int_packed(2); // dynamic actor GUID
-    actor_payload.write_int_packed(1); // odd/static class/archetype probe
-    break;
-  case ActorPayloadProbeMode::DynamicActorGuid2Class3:
-    actor_payload.write_int_packed(2); // dynamic actor GUID
-    actor_payload.write_int_packed(
-        3); // another small static class/archetype probe
-    break;
-  case ActorPayloadProbeMode::DynamicActorGuid2ContentEmpty:
-    // Actor GUID followed by an empty content block header as if
-    // SerializeNewActor succeeded and ProcessBunch started reading actor
-    // content. This is expected to fail unless GUID/class resolution also
-    // works, but it tells us whether the reader advances past the initial actor
-    // GUID boundary.
-    actor_payload.write_int_packed(2); // dynamic actor GUID
-    actor_payload.write_bit(false);    // bHasRepLayout = 0
-    actor_payload.write_bit(true);     // bIsActor = 1
-    actor_payload.write_int_packed(0); // NumPayloadBits = 0
-    break;
-  case ActorPayloadProbeMode::MustMapNoneThenGuid2:
-    // bHasMustBeMappedGUIDs=1 with NumMustBeMappedGUIDs=0, then the same
-    // dynamic actor GUID. This isolates whether the client accepts the
-    // must-map prefix framing at all. UE serializes the count as uint16.
-    actor_payload.write_u16(0);
-    actor_payload.write_int_packed(2);
-    break;
-  case ActorPayloadProbeMode::MustMapGuid2ThenGuid2:
-    // Prefix one must-map GUID (dynamic actor GUID 2), then serialize the
-    // same dynamic actor GUID as the new actor object. Without a real export
-    // this may fail, but a different failure proves the must-map boundary.
-    actor_payload.write_u16(1);
-    actor_payload.write_int_packed(2);
-    actor_payload.write_int_packed(2);
-    break;
-  case ActorPayloadProbeMode::MustMapGuid2Guid4ThenGuid2:
-    // Prefix two dynamic GUIDs then the actor GUID. Useful if class/archetype
-    // has to be in the must-map prefix before SerializeNewActor advances.
-    actor_payload.write_u16(2);
-    actor_payload.write_int_packed(2);
-    actor_payload.write_int_packed(4);
-    actor_payload.write_int_packed(2);
-    break;
-  case ActorPayloadProbeMode::ExportCount0ThenGuid2:
-    write_export_prefix_count0();
-    actor_payload.write_int_packed(2);
-    break;
-  case ActorPayloadProbeMode::ExportGuid2ActorPathThenGuid2:
-    write_export_prefix_one_path(2, "/Script/Engine.Actor");
-    actor_payload.write_int_packed(2);
-    break;
-  case ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2:
-    write_export_prefix_one_path(
-        2, actor_class_path_hint.empty()
-               ? std::string("/Script/Engine.PlayerController")
-               : actor_class_path_hint);
-    actor_payload.write_int_packed(2);
-    break;
+  normal.write_termination_bit();
+
+  BitWriter out;
+  out.write_bits_u64(response.session_id & 0x3, SessionIdBits);
+  out.write_bits_u64(response.client_id & 0x7, ClientIdBits);
+  out.write_bit(false);
+  out.append_bits(normal);
+  out.write_termination_bit();
+  return out.bytes();
+}
+
+std::vector<uint8_t> build_experimental_actor_channel_content_probe(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t actor_channel_index,
+    uint16_t next_out_reliable_actor_ch,
+    ActorChannelNameWireMode actor_name_mode,
+    ActorPayloadProbeMode payload_mode,
+    const std::string &actor_class_path_hint) {
+  uint16_t server_seq = 0, client_seq = 0;
+  extract_sequences_from_cookie(response, server_seq, client_seq);
+
+  const uint16_t packet_seq =
+      next_server_packet_seq ? next_server_packet_seq : server_seq;
+  const uint16_t ack_seq =
+      last_client_packet_seq ? last_client_packet_seq : client_seq;
+
+  BitWriter normal;
+  write_packet_notify_header(normal, packet_seq, ack_seq);
+  normal.write_bit(true);
+  normal.write_int_wrapped(MaxJitterClockTimeValue,
+                           MaxJitterClockTimeValue + 1);
+  normal.write_bit(false);
+
+  // Reliable follow-up actor bunch on an already-opened actor channel.
+  // This separates "actor open bunch was accepted" from "client needs a
+  // following content bunch / real replicated data after the open".
+  normal.write_bit(false); // bIsOpenOrClose
+  normal.write_bit(false); // bIsReplicationPaused
+  normal.write_bit(true);  // bReliable
+  normal.write_int_packed(actor_channel_index);
+  normal.write_bit(false); // bHasPackageMapExports
+  normal.write_bit(false); // bHasMustBeMappedGUIDs
+  normal.write_bit(false); // bPartial
+  normal.write_int_wrapped(next_out_reliable_actor_ch & (MaxChSequence - 1),
+                           MaxChSequence);
+  if (actor_name_mode == ActorChannelNameWireMode::LegacyChannelTypeActor) {
+    normal.write_int_wrapped(2, 8); // CHTYPE_Actor
+  } else {
+    write_static_serialize_name_string_path(normal, "Actor");
   }
+
+  BitWriter actor_payload;
+  write_actor_payload_probe_bits(actor_payload, payload_mode,
+                                 actor_class_path_hint);
   normal.write_int_wrapped(actor_payload.bit_count(), 1024 * 8);
   normal.append_bits(actor_payload);
 
