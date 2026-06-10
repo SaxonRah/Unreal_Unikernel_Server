@@ -18,7 +18,8 @@ ops run ./build/ue574_endpoint -p 7777/udp
 ```
 cmake -S . -B build -G "Visual Studio 17 2022"
 cmake --build build --config Release -j
-.\build\Release\ue574_endpoint.exe --port 7777 --experimental-control-replies
+
+.\build\Release\ue574_endpoint.exe --port 7777 --binlog ue574-real-client.binlog --experimental-control-replies --level-name /Game/NanoS_Testing --game-name /Game/NanoS_GMBP.NanoS_GMBP_C
 ```
 
 ## Test client on Windows:

@@ -53,6 +53,15 @@ void extract_sequences_from_cookie(const UEHandshake &response,
 
 std::vector<uint8_t>
 build_experimental_control_reply_packet(const ControlReplyBuildInput &in);
+
+// PacketNotify-only packet: no reliable bunch, just ACK the latest client
+// packet. Needed after Welcome so the client's NetSpeed/Join-side reliable
+// traffic stops being retransmitted while we have no real game-state packets
+// yet.
+std::vector<uint8_t>
+build_experimental_ack_only_packet(const UEHandshake &response,
+                                   uint16_t last_client_packet_seq,
+                                   uint16_t next_server_packet_seq);
 std::vector<uint8_t>
 build_experimental_nmt_challenge(const UEHandshake &response,
                                  uint16_t last_client_packet_seq);
@@ -70,6 +79,12 @@ std::vector<uint8_t> build_experimental_nmt_challenge_stateful(
 std::vector<uint8_t> build_experimental_nmt_welcome_stateful(
     const UEHandshake &response, uint16_t last_client_packet_seq,
     uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0);
+
+std::vector<uint8_t> build_experimental_nmt_welcome_stateful_custom(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0,
+    const std::string &level_name, const std::string &game_name,
+    const std::string &redirect_url);
 
 // Older candidate builders kept for A/B testing if needed, but the endpoint now
 // sends one clean candidate by default.

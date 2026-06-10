@@ -201,6 +201,40 @@ static void write_control_message_payload(BitWriter &w,
 }
 
 std::vector<uint8_t>
+build_experimental_ack_only_packet(const UEHandshake &response,
+                                   uint16_t last_client_packet_seq,
+                                   uint16_t next_server_packet_seq) {
+  uint16_t server_seq = 0, client_seq = 0;
+  extract_sequences_from_cookie(response, server_seq, client_seq);
+
+  const uint16_t packet_seq =
+      next_server_packet_seq ? next_server_packet_seq : server_seq;
+  const uint16_t ack_seq =
+      last_client_packet_seq ? last_client_packet_seq : client_seq;
+
+  BitWriter normal;
+  write_packet_notify_header(normal, packet_seq, ack_seq);
+
+  // Match the post-handshake PacketEngineNetVer >= JitterInHeader shape.
+  normal.write_bit(true);
+  normal.write_int_wrapped(MaxJitterClockTimeValue,
+                           MaxJitterClockTimeValue + 1);
+  normal.write_bit(false);
+
+  // No bunch payload: just the NetConnection packet terminator. PacketHandler
+  // then gets its own outer terminator below, same as real accepted packets.
+  normal.write_termination_bit();
+
+  BitWriter out;
+  out.write_bits_u64(response.session_id & 0x3, SessionIdBits);
+  out.write_bits_u64(response.client_id & 0x7, ClientIdBits);
+  out.write_bit(false); // bHandshakePacket=0
+  out.append_bits(normal);
+  out.write_termination_bit();
+  return out.bytes();
+}
+
+std::vector<uint8_t>
 build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
   BitWriter normal;
 
@@ -306,16 +340,26 @@ std::vector<uint8_t> build_experimental_nmt_challenge_stateful(
   return build_experimental_control_reply_packet(in);
 }
 
-std::vector<uint8_t> build_experimental_nmt_welcome_stateful(
+std::vector<uint8_t> build_experimental_nmt_welcome_stateful_custom(
     const UEHandshake &response, uint16_t last_client_packet_seq,
-    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0) {
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0,
+    const std::string &level_name, const std::string &game_name,
+    const std::string &redirect_url) {
   auto in = base_input(response, last_client_packet_seq);
   apply_stateful_sequences(in, next_server_packet_seq, next_out_reliable_ch0);
   in.message_id = NMT_Welcome;
-  in.message_strings = {"/Game/Maps/Minimal", "/Script/Engine.GameModeBase",
-                        ""};
+  in.message_strings = {level_name, game_name, redirect_url};
   in.name_mode = NameWireMode::StaticSerializeNameStringControl;
   return build_experimental_control_reply_packet(in);
+}
+
+std::vector<uint8_t> build_experimental_nmt_welcome_stateful(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0) {
+  return build_experimental_nmt_welcome_stateful_custom(
+      response, last_client_packet_seq, next_server_packet_seq,
+      next_out_reliable_ch0, "/Game/Maps/Minimal",
+      "/Script/Engine.GameModeBase", "");
 }
 
 std::vector<uint8_t>
