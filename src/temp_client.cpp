@@ -1,27 +1,23 @@
 #include "udp_util.h"
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include <vector>
 
-static bool recv_once(int fd, uint8_t *buf, size_t cap, ssize_t &n_out) {
+static bool recv_once(udp_socket_t fd, uint8_t *buf, size_t cap,
+                      udp_ssize_t &n_out) {
   sockaddr_in from{};
-  socklen_t from_len = sizeof(from);
-  ssize_t n =
-      recvfrom(fd, buf, cap, 0, reinterpret_cast<sockaddr *>(&from), &from_len);
+  udp_ssize_t n = udp_recv(fd, from, buf, cap);
   if (n < 0) {
-    fprintf(stderr, "recvfrom: %s\n", strerror(errno));
+    fprintf(stderr, "recvfrom: %s\n", udp_last_error_string());
     return false;
   }
   n_out = n;
-  printf("client rx %zd bytes: %s\n", n, udp_hex(buf, (size_t)n, 128).c_str());
+  printf("client rx %lld bytes: %s\n", (long long)n,
+         udp_hex(buf, (size_t)n, 128).c_str());
   return true;
 }
 
@@ -34,16 +30,12 @@ int main(int argc, char **argv) {
   if (argc >= 3)
     port = (uint16_t)atoi(argv[2]);
 
-  int fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) {
-    fprintf(stderr, "socket: %s\n", strerror(errno));
+  udp_socket_t fd = udp_create_socket();
+  if (!udp_socket_is_valid(fd)) {
+    fprintf(stderr, "socket: %s\n", udp_last_error_string());
     return 1;
   }
-
-  struct timeval tv {};
-  tv.tv_sec = 2;
-  tv.tv_usec = 0;
-  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+  udp_set_recv_timeout_ms(fd, 2000);
 
   sockaddr_in server{};
   server.sin_family = AF_INET;
@@ -54,7 +46,7 @@ int main(int argc, char **argv) {
   }
 
   uint8_t rx[2048];
-  ssize_t n = 0;
+  udp_ssize_t n = 0;
 
   const uint8_t hs1[] = {'U', 'E', 'H', 'S', 1};
   printf("client tx temp handshake initial\n");
@@ -88,6 +80,6 @@ int main(int argc, char **argv) {
     return 1;
 
   printf("temporary flow complete\n");
-  close(fd);
+  udp_close(fd);
   return 0;
 }

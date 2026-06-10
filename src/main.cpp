@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <unordered_map>
 
@@ -80,8 +79,8 @@ int main(int argc, char **argv) {
   signal(SIGTERM, on_signal);
   srand((unsigned)time(nullptr));
 
-  int fd = udp_bind_any(port);
-  if (fd < 0) {
+  udp_socket_t fd = udp_bind_any(port);
+  if (!udp_socket_is_valid(fd)) {
     return 1;
   }
 
@@ -99,7 +98,7 @@ int main(int argc, char **argv) {
 
   while (g_running) {
     sockaddr_in from{};
-    ssize_t n = udp_recv(fd, from, buf, sizeof(buf));
+    udp_ssize_t n = udp_recv(fd, from, buf, sizeof(buf));
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -115,7 +114,7 @@ int main(int argc, char **argv) {
       udp_write_binlog_record(binlog, true, ts, from, buf, (uint32_t)n);
     }
 
-    printf("rx %zd bytes from %s: %s\n", n, who.c_str(),
+    printf("rx %lld bytes from %s: %s\n", (long long)n, who.c_str(),
            udp_hex(buf, (size_t)n, 96).c_str());
 
     ue574::ParsedPacket pp = ue574::parse_datagram(from, buf, (size_t)n);
@@ -299,6 +298,6 @@ int main(int argc, char **argv) {
 
   if (binlog)
     fclose(binlog);
-  close(fd);
+  udp_close(fd);
   return 0;
 }

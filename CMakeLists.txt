@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ue5_574_nanos_endpoint_v8 CXX)
+project(ue5_574_nanos_endpoint_v9 CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,29 +8,40 @@ option(BUILD_STATIC "Build static ELF where supported" ON)
 
 add_library(ue574_common
     src/udp_util.cpp
-    src/bit_io.cpp
     src/crypto_sha1_hmac.cpp
+    src/bit_io.cpp
     src/ue57_protocol.cpp
     src/control_channel_probe.cpp
     src/control_channel_writer.cpp
 )
 
-target_compile_options(ue574_common PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
-
 add_executable(ue574_endpoint src/main.cpp)
 target_link_libraries(ue574_endpoint PRIVATE ue574_common)
-target_compile_options(ue574_endpoint PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
-
-
-add_executable(ue574_probe_client src/ue574_probe_client.cpp)
-target_link_libraries(ue574_probe_client PRIVATE ue574_common)
-target_compile_options(ue574_probe_client PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
 
 add_executable(ue574_temp_client src/temp_client.cpp)
 target_link_libraries(ue574_temp_client PRIVATE ue574_common)
-target_compile_options(ue574_temp_client PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
 
-if(BUILD_STATIC)
+add_executable(ue574_probe_client src/ue574_probe_client.cpp)
+target_link_libraries(ue574_probe_client PRIVATE ue574_common)
+
+set(UE574_TARGETS ue574_common ue574_endpoint ue574_temp_client ue574_probe_client)
+
+foreach(tgt IN LISTS UE574_TARGETS)
+    if(MSVC)
+        target_compile_options(${tgt} PRIVATE /W4 /permissive-)
+        target_compile_definitions(${tgt} PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+    else()
+        target_compile_options(${tgt} PRIVATE -Wall -Wextra -Wpedantic -fno-exceptions)
+    endif()
+endforeach()
+
+if(WIN32)
+    target_link_libraries(ue574_common PUBLIC ws2_32)
+endif()
+
+# NanoS target is Linux ELF. Static linking is useful there, but MSVC does not
+# understand GNU-style -static.
+if(BUILD_STATIC AND NOT MSVC)
     target_link_options(ue574_endpoint PRIVATE -static)
     target_link_options(ue574_temp_client PRIVATE -static)
     target_link_options(ue574_probe_client PRIVATE -static)

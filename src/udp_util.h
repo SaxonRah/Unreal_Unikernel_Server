@@ -1,9 +1,30 @@
 #pragma once
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+using udp_socket_t = SOCKET;
+using udp_ssize_t = int;
+using udp_socklen_t = int;
+#else
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+using udp_socket_t = int;
+using udp_ssize_t = ssize_t;
+using udp_socklen_t = socklen_t;
+#endif
 
 #include <string>
 
@@ -26,11 +47,22 @@ struct UdpClientKeyHash {
   }
 };
 
-int udp_bind_any(uint16_t port);
-ssize_t udp_recv(int fd, sockaddr_in &from, uint8_t *buf, size_t cap);
-bool udp_send(int fd, const sockaddr_in &to, const uint8_t *data, size_t n);
-bool udp_send_logged(int fd, const sockaddr_in &to, const uint8_t *data,
-                     size_t n, FILE *binlog);
+bool udp_platform_init();
+void udp_platform_cleanup();
+udp_socket_t udp_invalid_socket();
+bool udp_socket_is_valid(udp_socket_t s);
+udp_socket_t udp_create_socket();
+void udp_close(udp_socket_t s);
+bool udp_set_recv_timeout_ms(udp_socket_t s, int timeout_ms);
+const char *udp_last_error_string();
+
+udp_socket_t udp_bind_any(uint16_t port);
+udp_ssize_t udp_recv(udp_socket_t fd, sockaddr_in &from, uint8_t *buf,
+                     size_t cap);
+bool udp_send(udp_socket_t fd, const sockaddr_in &to, const uint8_t *data,
+              size_t n);
+bool udp_send_logged(udp_socket_t fd, const sockaddr_in &to,
+                     const uint8_t *data, size_t n, FILE *binlog);
 
 UdpClientKey udp_key_from_addr(const sockaddr_in &a);
 std::string udp_addr_to_string(const sockaddr_in &a);

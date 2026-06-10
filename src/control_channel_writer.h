@@ -2,7 +2,6 @@
 
 #include "ue57_protocol.h"
 
-#include <netinet/in.h>
 #include <stdint.h>
 #include <string>
 #include <vector>

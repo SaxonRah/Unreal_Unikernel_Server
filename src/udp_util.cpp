@@ -2,19 +2,102 @@
 
 #include <errno.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 
-int udp_bind_any(uint16_t port) {
-  int fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (fd < 0) {
-    fprintf(stderr, "socket failed: %s\n", strerror(errno));
-    return -1;
+#ifdef _WIN32
+static char g_udp_errbuf[128];
+#else
+static char g_udp_errbuf[128];
+#endif
+
+bool udp_platform_init() {
+#ifdef _WIN32
+  static bool initialized = false;
+  if (initialized)
+    return true;
+  WSADATA wsa{};
+  int r = WSAStartup(MAKEWORD(2, 2), &wsa);
+  if (r != 0) {
+    snprintf(g_udp_errbuf, sizeof(g_udp_errbuf), "WSAStartup failed: %d", r);
+    return false;
+  }
+  initialized = true;
+#endif
+  return true;
+}
+
+void udp_platform_cleanup() {
+#ifdef _WIN32
+  WSACleanup();
+#endif
+}
+
+udp_socket_t udp_invalid_socket() {
+#ifdef _WIN32
+  return INVALID_SOCKET;
+#else
+  return -1;
+#endif
+}
+
+bool udp_socket_is_valid(udp_socket_t s) {
+#ifdef _WIN32
+  return s != INVALID_SOCKET;
+#else
+  return s >= 0;
+#endif
+}
+
+const char *udp_last_error_string() {
+#ifdef _WIN32
+  snprintf(g_udp_errbuf, sizeof(g_udp_errbuf), "WSA error %d",
+           WSAGetLastError());
+  return g_udp_errbuf;
+#else
+  return strerror(errno);
+#endif
+}
+
+udp_socket_t udp_create_socket() {
+  if (!udp_platform_init())
+    return udp_invalid_socket();
+  udp_socket_t fd = socket(AF_INET, SOCK_DGRAM, 0);
+  return fd;
+}
+
+void udp_close(udp_socket_t s) {
+  if (!udp_socket_is_valid(s))
+    return;
+#ifdef _WIN32
+  closesocket(s);
+#else
+  close(s);
+#endif
+}
+
+bool udp_set_recv_timeout_ms(udp_socket_t s, int timeout_ms) {
+#ifdef _WIN32
+  DWORD tv = (DWORD)timeout_ms;
+  return setsockopt(s, SOL_SOCKET, SO_RCVTIMEO,
+                    reinterpret_cast<const char *>(&tv), sizeof(tv)) == 0;
+#else
+  struct timeval tv {};
+  tv.tv_sec = timeout_ms / 1000;
+  tv.tv_usec = (timeout_ms % 1000) * 1000;
+  return setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0;
+#endif
+}
+
+udp_socket_t udp_bind_any(uint16_t port) {
+  udp_socket_t fd = udp_create_socket();
+  if (!udp_socket_is_valid(fd)) {
+    fprintf(stderr, "socket failed: %s\n", udp_last_error_string());
+    return udp_invalid_socket();
   }
 
   int yes = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char *>(&yes),
+             sizeof(yes));
 
   sockaddr_in bind_addr{};
   bind_addr.sin_family = AF_INET;
@@ -24,32 +107,34 @@ int udp_bind_any(uint16_t port) {
   if (bind(fd, reinterpret_cast<sockaddr *>(&bind_addr), sizeof(bind_addr)) <
       0) {
     fprintf(stderr, "bind UDP/%u failed: %s\n", (unsigned)port,
-            strerror(errno));
-    close(fd);
-    return -1;
+            udp_last_error_string());
+    udp_close(fd);
+    return udp_invalid_socket();
   }
 
   return fd;
 }
 
-ssize_t udp_recv(int fd, sockaddr_in &from, uint8_t *buf, size_t cap) {
-  socklen_t from_len = sizeof(from);
-  return recvfrom(fd, buf, cap, 0, reinterpret_cast<sockaddr *>(&from),
-                  &from_len);
+udp_ssize_t udp_recv(udp_socket_t fd, sockaddr_in &from, uint8_t *buf,
+                     size_t cap) {
+  udp_socklen_t from_len = sizeof(from);
+  return recvfrom(fd, reinterpret_cast<char *>(buf), (int)cap, 0,
+                  reinterpret_cast<sockaddr *>(&from), &from_len);
 }
 
-bool udp_send(int fd, const sockaddr_in &to, const uint8_t *data, size_t n) {
-  ssize_t r = sendto(fd, data, n, 0, reinterpret_cast<const sockaddr *>(&to),
-                     sizeof(to));
+bool udp_send(udp_socket_t fd, const sockaddr_in &to, const uint8_t *data,
+              size_t n) {
+  udp_ssize_t r = sendto(fd, reinterpret_cast<const char *>(data), (int)n, 0,
+                         reinterpret_cast<const sockaddr *>(&to), sizeof(to));
   if (r < 0) {
-    fprintf(stderr, "sendto failed: %s\n", strerror(errno));
+    fprintf(stderr, "sendto failed: %s\n", udp_last_error_string());
     return false;
   }
   return (size_t)r == n;
 }
 
-bool udp_send_logged(int fd, const sockaddr_in &to, const uint8_t *data,
-                     size_t n, FILE *binlog) {
+bool udp_send_logged(udp_socket_t fd, const sockaddr_in &to,
+                     const uint8_t *data, size_t n, FILE *binlog) {
   bool ok = udp_send(fd, to, data, n);
   if (ok && binlog) {
     udp_write_binlog_record(binlog, false, (uint64_t)time(nullptr), to, data,
@@ -64,7 +149,7 @@ UdpClientKey udp_key_from_addr(const sockaddr_in &a) {
 
 std::string udp_addr_to_string(const sockaddr_in &a) {
   char ip[INET_ADDRSTRLEN] = {};
-  inet_ntop(AF_INET, &a.sin_addr, ip, sizeof(ip));
+  inet_ntop(AF_INET, const_cast<in_addr *>(&a.sin_addr), ip, sizeof(ip));
   char buf[64];
   snprintf(buf, sizeof(buf), "%s:%u", ip, (unsigned)ntohs(a.sin_port));
   return std::string(buf);
@@ -89,9 +174,6 @@ std::string udp_hex(const uint8_t *p, size_t n, size_t max_n) {
 void udp_write_binlog_record(FILE *f, bool inbound, uint64_t unix_seconds,
                              const sockaddr_in &peer, const uint8_t *data,
                              uint32_t n) {
-  // Simple append-only binary log:
-  // magic "U5BL", version u16=1, dir u8, reserved u8,
-  // unix seconds u64, ip_be u32, port_be u16, len u32, data[len].
   const uint8_t magic[4] = {'U', '5', 'B', 'L'};
   uint16_t ver = 1;
   uint8_t dir = inbound ? 1 : 2;
