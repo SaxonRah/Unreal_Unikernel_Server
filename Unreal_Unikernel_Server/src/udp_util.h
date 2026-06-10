@@ -55,6 +55,9 @@ udp_socket_t udp_create_socket();
 void udp_close(udp_socket_t s);
 bool udp_set_recv_timeout_ms(udp_socket_t s, int timeout_ms);
 const char *udp_last_error_string();
+int udp_last_error_code();
+bool udp_recv_error_is_transient();
+bool udp_recv_error_is_connection_reset();
 
 udp_socket_t udp_bind_any(uint16_t port);
 udp_ssize_t udp_recv(udp_socket_t fd, sockaddr_in &from, uint8_t *buf,

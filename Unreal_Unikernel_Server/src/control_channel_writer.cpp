@@ -14,6 +14,58 @@ static constexpr uint32_t NumBitsForJitterClockTimeInHeader = 10;
 static constexpr uint32_t MaxJitterClockTimeValue =
     (1u << NumBitsForJitterClockTimeInHeader) - 1u;
 
+const char *actor_channel_name_wire_mode_name(ActorChannelNameWireMode mode) {
+  switch (mode) {
+  case ActorChannelNameWireMode::LegacyChannelTypeActor:
+    return "legacy-CHTYPE_Actor";
+  case ActorChannelNameWireMode::StaticSerializeNameStringActor:
+    return "static-serialize-name-string-Actor";
+  }
+  return "?";
+}
+
+const char *actor_payload_probe_mode_name(ActorPayloadProbeMode mode) {
+  switch (mode) {
+  case ActorPayloadProbeMode::Empty:
+    return "empty";
+  case ActorPayloadProbeMode::ZeroByte:
+    return "zero8";
+  case ActorPayloadProbeMode::FourZeroBytes:
+    return "zero32";
+  case ActorPayloadProbeMode::PackedNetGuidZero:
+    return "netguid0";
+  case ActorPayloadProbeMode::PackedNetGuidOne:
+    return "netguid1";
+  case ActorPayloadProbeMode::PackedNetGuidOneClassZero:
+    return "netguid1-class0";
+  case ActorPayloadProbeMode::PackedNetGuidOneClassOne:
+    return "netguid1-class1";
+  case ActorPayloadProbeMode::DynamicActorGuid2:
+    return "dynamic-guid2";
+  case ActorPayloadProbeMode::DynamicActorGuid2Class0:
+    return "dynamic-guid2-class0";
+  case ActorPayloadProbeMode::DynamicActorGuid2Class1:
+    return "dynamic-guid2-class1";
+  case ActorPayloadProbeMode::DynamicActorGuid2Class3:
+    return "dynamic-guid2-class3";
+  case ActorPayloadProbeMode::DynamicActorGuid2ContentEmpty:
+    return "dynamic-guid2-content-empty";
+  case ActorPayloadProbeMode::MustMapNoneThenGuid2:
+    return "mustmap-none-guid2";
+  case ActorPayloadProbeMode::MustMapGuid2ThenGuid2:
+    return "mustmap-guid2";
+  case ActorPayloadProbeMode::MustMapGuid2Guid4ThenGuid2:
+    return "mustmap-guid2-guid4";
+  case ActorPayloadProbeMode::ExportCount0ThenGuid2:
+    return "export-count0-guid2";
+  case ActorPayloadProbeMode::ExportGuid2ActorPathThenGuid2:
+    return "export-guid2-actor-path";
+  case ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2:
+    return "export-guid2-class-path";
+  }
+  return "?";
+}
+
 const char *name_wire_mode_name(NameWireMode mode) {
   switch (mode) {
   case NameWireMode::StaticSerializeNameStringControl:
@@ -138,7 +190,9 @@ static void write_ue_fstring_ansi(BitWriter &w, const std::string &text) {
   w.write_u8(0);
 }
 
-static void write_static_serialize_name_control_string_path(BitWriter &w) {
+static void
+write_static_serialize_name_string_path(BitWriter &w,
+                                        const std::string &plain_name) {
   // CoreNet.cpp, UPackageMap::StaticSerializeName save path:
   //
   //   const EName* InEName = InName.ToEName();
@@ -152,9 +206,13 @@ static void write_static_serialize_name_control_string_path(BitWriter &w) {
   // The load path accepts either representation. We deliberately use the
   // string fallback for NAME_Control so we do not need the private numeric
   // EName::Control index from UnrealNames.inl.
-  w.write_bit(false);                  // bHardcoded = 0 => string fallback
-  write_ue_fstring_ansi(w, "Control"); // FName plain name string
-  write_i32(w, 0);                     // FName number
+  w.write_bit(false);                   // bHardcoded = 0 => string fallback
+  write_ue_fstring_ansi(w, plain_name); // FName plain name string
+  write_i32(w, 0);                      // FName number
+}
+
+static void write_static_serialize_name_control_string_path(BitWriter &w) {
+  write_static_serialize_name_string_path(w, "Control");
 }
 
 static void write_fname_control(BitWriter &w, NameWireMode mode) {
@@ -229,6 +287,206 @@ build_experimental_ack_only_packet(const UEHandshake &response,
   out.write_bits_u64(response.session_id & 0x3, SessionIdBits);
   out.write_bits_u64(response.client_id & 0x7, ClientIdBits);
   out.write_bit(false); // bHandshakePacket=0
+  out.append_bits(normal);
+  out.write_termination_bit();
+  return out.bytes();
+}
+
+std::vector<uint8_t> build_experimental_empty_actor_channel_open_probe(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t actor_channel_index,
+    uint16_t next_out_reliable_actor_ch,
+    ActorChannelNameWireMode actor_name_mode,
+    ActorPayloadProbeMode payload_mode,
+    const std::string &actor_class_path_hint) {
+  uint16_t server_seq = 0, client_seq = 0;
+  extract_sequences_from_cookie(response, server_seq, client_seq);
+
+  const uint16_t packet_seq =
+      next_server_packet_seq ? next_server_packet_seq : server_seq;
+  const uint16_t ack_seq =
+      last_client_packet_seq ? last_client_packet_seq : client_seq;
+
+  BitWriter normal;
+  write_packet_notify_header(normal, packet_seq, ack_seq);
+
+  // PacketEngineNetVer >= JitterInHeader packet-info payload.
+  normal.write_bit(true);
+  normal.write_int_wrapped(MaxJitterClockTimeValue,
+                           MaxJitterClockTimeValue + 1);
+  normal.write_bit(false);
+
+  // Experimental minimal actor-channel open probe. This is NOT real actor
+  // replication yet. It opens a reliable channel with ChName=Actor and zero
+  // bunch payload so we can see whether the client accepts the channel header
+  // shape or closes/retries. Real SpawnPlayActor/replication will need a
+  // PackageMap/NetGUID-exported actor payload after this milestone.
+  normal.write_bit(true);  // bIsOpenOrClose
+  normal.write_bit(true);  // bOpen
+  normal.write_bit(false); // bClose
+  normal.write_bit(false); // bIsReplicationPaused
+  normal.write_bit(true);  // bReliable
+  normal.write_int_packed(actor_channel_index);
+  const bool has_must_map_prefix =
+      payload_mode == ActorPayloadProbeMode::MustMapNoneThenGuid2 ||
+      payload_mode == ActorPayloadProbeMode::MustMapGuid2ThenGuid2 ||
+      payload_mode == ActorPayloadProbeMode::MustMapGuid2Guid4ThenGuid2;
+  const bool has_package_map_exports =
+      payload_mode == ActorPayloadProbeMode::ExportCount0ThenGuid2 ||
+      payload_mode == ActorPayloadProbeMode::ExportGuid2ActorPathThenGuid2 ||
+      payload_mode == ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2;
+  normal.write_bit(has_package_map_exports); // bHasPackageMapExports
+  normal.write_bit(has_must_map_prefix);     // bHasMustBeMappedGUIDs
+  normal.write_bit(false);                   // bPartial
+  normal.write_int_wrapped(next_out_reliable_actor_ch & (MaxChSequence - 1),
+                           MaxChSequence);
+  if (actor_name_mode == ActorChannelNameWireMode::LegacyChannelTypeActor) {
+    // NetConnection.cpp pre-ChannelNames branch:
+    //   Reader.ReadInt(CHTYPE_MAX) where CHTYPE_Actor == 2 and CHTYPE_MAX == 8.
+    // The v35 string-name actor probe was understood as a bunch but rejected
+    // with BunchWrongChannelType, which strongly indicates this client path
+    // wants the legacy channel type enum here for actor-channel opens.
+    normal.write_int_wrapped(2, 8);
+  } else {
+    write_static_serialize_name_string_path(normal, "Actor");
+  }
+
+  // Build the actor-bunch payload into its own bitstream first so the bunch
+  // header can write the exact payload bit count.
+  BitWriter actor_payload;
+
+  auto write_export_prefix_count0 = [&]() {
+    // Diagnostic PackageMap export boundary probe. The exact
+    // UPackageMapClient export format lives outside the uploaded source, so
+    // this starts with the most likely compact-count boundary. If the client
+    // reacts differently than the non-export modes, bHasPackageMapExports is
+    // reaching ReceiveNetGUIDBunch before SerializeNewActor.
+    actor_payload.write_int_packed(0);
+  };
+  auto write_export_prefix_one_path = [&](uint32_t guid_value,
+                                          const std::string &path) {
+    // Speculative one-export shape: count, GUID, outer GUID, path string,
+    // checksum/flags placeholder. This is not a real PackageMap exporter
+    // yet; it is a boundary probe to test whether path-bearing export data
+    // changes client behavior versus bare GUID payloads.
+    actor_payload.write_int_packed(1);
+    actor_payload.write_int_packed(guid_value);
+    actor_payload.write_int_packed(0);
+    write_ue_fstring_ansi(actor_payload, path);
+    actor_payload.write_int_packed(0);
+  };
+
+  switch (payload_mode) {
+  case ActorPayloadProbeMode::Empty:
+    break;
+  case ActorPayloadProbeMode::ZeroByte:
+    actor_payload.write_u8(0);
+    break;
+  case ActorPayloadProbeMode::FourZeroBytes:
+    actor_payload.write_u32(0);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidZero:
+    // Likely first SerializeObject/SerializeNewActor field: an actor
+    // FNetworkGUID serialized as packed int. Zero is an invalid/null
+    // object probe. If the client responds with object/guid failure,
+    // we know this boundary is plausible.
+    actor_payload.write_int_packed(0);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidOne:
+    // Minimal non-zero actor NetGUID probe. Not enough to spawn, but
+    // enough to distinguish empty-payload timeout from NetGUID parsing.
+    actor_payload.write_int_packed(1);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidOneClassZero:
+    // Actor NetGUID + null class/object GUID probe. This approximates
+    // the next SerializeObject boundary without path exports.
+    actor_payload.write_int_packed(1);
+    actor_payload.write_int_packed(0);
+    break;
+  case ActorPayloadProbeMode::PackedNetGuidOneClassOne:
+    // Actor NetGUID + non-zero class/object GUID probe. Still no path
+    // exports, so a clean NetGUID/object-resolution failure is expected.
+    actor_payload.write_int_packed(1);
+    actor_payload.write_int_packed(1);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2:
+    // FNetworkGUID value layout: low bit is static flag, upper bits are index.
+    // Value 2 => dynamic GUID with index 1, a better approximation for a newly
+    // spawned replicated actor than odd/static value 1.
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2Class0:
+    actor_payload.write_int_packed(2); // dynamic actor GUID
+    actor_payload.write_int_packed(0); // null/default class/archetype probe
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2Class1:
+    actor_payload.write_int_packed(2); // dynamic actor GUID
+    actor_payload.write_int_packed(1); // odd/static class/archetype probe
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2Class3:
+    actor_payload.write_int_packed(2); // dynamic actor GUID
+    actor_payload.write_int_packed(
+        3); // another small static class/archetype probe
+    break;
+  case ActorPayloadProbeMode::DynamicActorGuid2ContentEmpty:
+    // Actor GUID followed by an empty content block header as if
+    // SerializeNewActor succeeded and ProcessBunch started reading actor
+    // content. This is expected to fail unless GUID/class resolution also
+    // works, but it tells us whether the reader advances past the initial actor
+    // GUID boundary.
+    actor_payload.write_int_packed(2); // dynamic actor GUID
+    actor_payload.write_bit(false);    // bHasRepLayout = 0
+    actor_payload.write_bit(true);     // bIsActor = 1
+    actor_payload.write_int_packed(0); // NumPayloadBits = 0
+    break;
+  case ActorPayloadProbeMode::MustMapNoneThenGuid2:
+    // bHasMustBeMappedGUIDs=1 with NumMustBeMappedGUIDs=0, then the same
+    // dynamic actor GUID. This isolates whether the client accepts the
+    // must-map prefix framing at all. UE serializes the count as uint16.
+    actor_payload.write_u16(0);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::MustMapGuid2ThenGuid2:
+    // Prefix one must-map GUID (dynamic actor GUID 2), then serialize the
+    // same dynamic actor GUID as the new actor object. Without a real export
+    // this may fail, but a different failure proves the must-map boundary.
+    actor_payload.write_u16(1);
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::MustMapGuid2Guid4ThenGuid2:
+    // Prefix two dynamic GUIDs then the actor GUID. Useful if class/archetype
+    // has to be in the must-map prefix before SerializeNewActor advances.
+    actor_payload.write_u16(2);
+    actor_payload.write_int_packed(2);
+    actor_payload.write_int_packed(4);
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::ExportCount0ThenGuid2:
+    write_export_prefix_count0();
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::ExportGuid2ActorPathThenGuid2:
+    write_export_prefix_one_path(2, "/Script/Engine.Actor");
+    actor_payload.write_int_packed(2);
+    break;
+  case ActorPayloadProbeMode::ExportGuid2ClassPathThenGuid2:
+    write_export_prefix_one_path(
+        2, actor_class_path_hint.empty()
+               ? std::string("/Script/Engine.PlayerController")
+               : actor_class_path_hint);
+    actor_payload.write_int_packed(2);
+    break;
+  }
+  normal.write_int_wrapped(actor_payload.bit_count(), 1024 * 8);
+  normal.append_bits(actor_payload);
+
+  normal.write_termination_bit();
+
+  BitWriter out;
+  out.write_bits_u64(response.session_id & 0x3, SessionIdBits);
+  out.write_bits_u64(response.client_id & 0x7, ClientIdBits);
+  out.write_bit(false);
   out.append_bits(normal);
   out.write_termination_bit();
   return out.bytes();
@@ -349,6 +607,18 @@ std::vector<uint8_t> build_experimental_nmt_welcome_stateful_custom(
   apply_stateful_sequences(in, next_server_packet_seq, next_out_reliable_ch0);
   in.message_id = NMT_Welcome;
   in.message_strings = {level_name, game_name, redirect_url};
+  in.name_mode = NameWireMode::StaticSerializeNameStringControl;
+  return build_experimental_control_reply_packet(in);
+}
+
+std::vector<uint8_t> build_experimental_nmt_failure_stateful_custom(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0,
+    const std::string &failure_text) {
+  auto in = base_input(response, last_client_packet_seq);
+  apply_stateful_sequences(in, next_server_packet_seq, next_out_reliable_ch0);
+  in.message_id = NMT_Failure;
+  in.message_strings = {failure_text};
   in.name_mode = NameWireMode::StaticSerializeNameStringControl;
   return build_experimental_control_reply_packet(in);
 }

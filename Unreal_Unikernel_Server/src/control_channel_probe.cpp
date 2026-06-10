@@ -21,6 +21,8 @@ const char *control_message_name(uint8_t id) {
     return "NMT_Login";
   case NMT_Failure:
     return "NMT_Failure";
+  case NMT_ActorChannelFailure:
+    return "NMT_ActorChannelFailure";
   case NMT_Join:
     return "NMT_Join";
   default:
@@ -247,6 +249,19 @@ PostHandshakeProbeReport probe_post_handshake_packet(const uint8_t *data,
     }
   }
 
+  return report;
+}
+
+PostHandshakeProbeReport
+probe_post_handshake_packet_from_bit(const uint8_t *data, size_t n,
+                                     uint32_t start_bit) {
+  PostHandshakeProbeReport report{};
+  report.payload_bits =
+      ue_payload_bit_count(data, n, report.has_ue_termination);
+  if (start_bit + 14 < report.payload_bits) {
+    BunchProbe p = try_parse_bunch_at(data, n, start_bit, report.payload_bits);
+    report.candidates.push_back(p);
+  }
   return report;
 }
 

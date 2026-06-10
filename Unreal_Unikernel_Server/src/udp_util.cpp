@@ -48,13 +48,38 @@ bool udp_socket_is_valid(udp_socket_t s) {
 #endif
 }
 
+int udp_last_error_code() {
+#ifdef _WIN32
+  return WSAGetLastError();
+#else
+  return errno;
+#endif
+}
+
 const char *udp_last_error_string() {
 #ifdef _WIN32
-  snprintf(g_udp_errbuf, sizeof(g_udp_errbuf), "WSA error %d",
-           WSAGetLastError());
+  int e = WSAGetLastError();
+  snprintf(g_udp_errbuf, sizeof(g_udp_errbuf), "WSA error %d", e);
   return g_udp_errbuf;
 #else
   return strerror(errno);
+#endif
+}
+
+bool udp_recv_error_is_transient() {
+#ifdef _WIN32
+  int e = WSAGetLastError();
+  return e == WSAEINTR || e == WSAEWOULDBLOCK || e == WSAETIMEDOUT;
+#else
+  return errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK;
+#endif
+}
+
+bool udp_recv_error_is_connection_reset() {
+#ifdef _WIN32
+  return WSAGetLastError() == WSAECONNRESET;
+#else
+  return errno == ECONNRESET;
 #endif
 }
 
@@ -111,6 +136,20 @@ udp_socket_t udp_bind_any(uint16_t port) {
     udp_close(fd);
     return udp_invalid_socket();
   }
+
+#ifdef _WIN32
+// Windows reports ICMP Port Unreachable for UDP sockets as WSAECONNRESET on
+// recvfrom(). That can happen when the UE client process/socket exits, and
+// it is not a protocol failure. Disable that behavior so the endpoint stays
+// alive between iterative test runs.
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+  BOOL new_behavior = FALSE;
+  DWORD bytes_returned = 0;
+  WSAIoctl(fd, SIO_UDP_CONNRESET, &new_behavior, sizeof(new_behavior), nullptr,
+           0, &bytes_returned, nullptr, nullptr);
+#endif
 
   return fd;
 }

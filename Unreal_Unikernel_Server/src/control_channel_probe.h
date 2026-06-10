@@ -18,7 +18,13 @@ enum ControlMessageId : uint8_t {
   NMT_Netspeed = 4,
   NMT_Login = 5,
   NMT_Failure = 6,
-  NMT_Join = 7,
+  // UE5.7.4 DataChannel.h: DEFINE_CONTROL_CHANNEL_MESSAGE(ActorChannelFailure,
+  // 16, int32).
+  NMT_ActorChannelFailure = 16,
+  // UE5.7.4 DataChannel.h: DEFINE_CONTROL_CHANNEL_MESSAGE(Join, 9).
+  // Earlier scaffolds used 7 as a placeholder, which made true 0x09 join
+  // bytes appear as "unknown/other".
+  NMT_Join = 9,
 };
 
 const char *control_message_name(uint8_t id);
@@ -48,6 +54,12 @@ struct PostHandshakeProbeReport {
 
 PostHandshakeProbeReport probe_post_handshake_packet(const uint8_t *data,
                                                      size_t n);
+// Parse exactly one bunch starting at an already-known bit offset, e.g. after
+// StatelessConnect + PacketNotify + packet-info. This avoids the broad scanner
+// false positives used during early reverse engineering.
+PostHandshakeProbeReport
+probe_post_handshake_packet_from_bit(const uint8_t *data, size_t n,
+                                     uint32_t start_bit);
 std::string
 format_post_handshake_report(const PostHandshakeProbeReport &report);
 
