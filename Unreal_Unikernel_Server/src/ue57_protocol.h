@@ -50,6 +50,7 @@ enum class PacketKind {
 enum class SessionPhase {
   CookieValidated,
   SawHello,
+  SawLogin,
   Welcomed,
 };
 
@@ -95,8 +96,8 @@ std::vector<uint8_t> build_ue574_initial(uint8_t client_id,
                                          uint16_t network_features);
 std::vector<uint8_t> build_ue574_response(const UEHandshake &challenge);
 //
-// These are packet builders for the protocol shape observed in the
-// UE5.7.4 source files. They intentionally do not copy Epic source.
+// These are clean-room packet builders for the protocol shape observed in the
+// uploaded UE5.7.4 source files. They intentionally do not copy Epic source.
 std::vector<uint8_t> build_ue574_challenge(const sockaddr_in &to,
                                            const UEHandshake &initial);
 bool validate_ue574_response(const sockaddr_in &from,

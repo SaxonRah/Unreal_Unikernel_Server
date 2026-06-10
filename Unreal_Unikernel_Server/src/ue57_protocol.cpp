@@ -95,6 +95,8 @@ const char *session_phase_name(SessionPhase p) {
     return "CookieValidated";
   case SessionPhase::SawHello:
     return "SawHello";
+  case SessionPhase::SawLogin:
+    return "SawLogin";
   case SessionPhase::Welcomed:
     return "Welcomed";
   }

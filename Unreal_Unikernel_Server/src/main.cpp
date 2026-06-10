@@ -241,46 +241,63 @@ int main(int argc, char **argv) {
         ue574::PostHandshakeProbeReport report =
             ue574::probe_post_handshake_packet(buf, (size_t)n);
         printf("%s", ue574::format_post_handshake_report(report).c_str());
+
+        bool saw_login = false;
+        bool saw_hello = false;
+
+        // The current probe is deliberately broad and can find multiple
+        // plausible candidates in the same packet. After NMT_Challenge is sent,
+        // NMT_Login is more important than another false-positive NMT_Hello, so
+        // detect all candidates first and then prioritize by current login
+        // phase.
         for (const auto &cand : report.candidates) {
-          if (cand.plausible && cand.first_payload_byte == ue574::NMT_Hello) {
-            it->second.phase = ue574::SessionPhase::SawHello;
-            printf("  observed likely NMT_Hello; experimental next step is "
-                   "NMT_Challenge bunch\n");
-            if (experimental_control_replies && it->second.real_ue) {
-              if (!it->second.sent_nmt_challenge) {
-                auto out = ue574::build_experimental_nmt_challenge(
-                    it->second.handshake, it->second.last_client_packet_seq);
-                printf("  sending experimental NMT_Challenge clean channel-0 "
-                       "reply (%zu bytes)\n",
-                       out.size());
-                udp_send_logged(fd, from, out.data(), out.size(), binlog);
-                it->second.sent_nmt_challenge = true;
-              } else {
-                printf("  NMT_Challenge already sent for this session; not "
-                       "retransmitting on probe packet\n");
-              }
-            }
-            break;
-          }
           if (cand.plausible && cand.first_payload_byte == ue574::NMT_Login) {
-            printf("  observed likely NMT_Login; experimental next step is "
-                   "NMT_Welcome bunch\n");
-            if (experimental_control_replies && it->second.real_ue) {
-              if (!it->second.sent_nmt_welcome) {
-                auto out = ue574::build_experimental_nmt_welcome(
-                    it->second.handshake, it->second.last_client_packet_seq);
-                printf("  sending experimental NMT_Welcome clean channel-0 "
-                       "reply (%zu bytes)\n",
-                       out.size());
-                udp_send_logged(fd, from, out.data(), out.size(), binlog);
-                it->second.sent_nmt_welcome = true;
-              } else {
-                printf("  NMT_Welcome already sent for this session; not "
-                       "retransmitting on probe packet\n");
-              }
-            }
-            break;
+            saw_login = true;
           }
+          if (cand.plausible && cand.first_payload_byte == ue574::NMT_Hello) {
+            saw_hello = true;
+          }
+        }
+
+        if (saw_login && it->second.sent_nmt_challenge) {
+          it->second.phase = ue574::SessionPhase::SawLogin;
+          printf("  observed likely NMT_Login after NMT_Challenge; "
+                 "experimental next step is NMT_Welcome bunch\n");
+          if (experimental_control_replies && it->second.real_ue) {
+            if (!it->second.sent_nmt_welcome) {
+              auto out = ue574::build_experimental_nmt_welcome(
+                  it->second.handshake, it->second.last_client_packet_seq);
+              printf("  sending experimental NMT_Welcome clean channel-0 reply "
+                     "(%zu bytes)\n",
+                     out.size());
+              udp_send_logged(fd, from, out.data(), out.size(), binlog);
+              it->second.sent_nmt_welcome = true;
+            } else {
+              printf("  NMT_Welcome already sent for this session; not "
+                     "retransmitting on probe packet\n");
+            }
+          }
+        } else if (saw_hello) {
+          it->second.phase = ue574::SessionPhase::SawHello;
+          printf("  observed likely NMT_Hello; experimental next step is "
+                 "NMT_Challenge bunch\n");
+          if (experimental_control_replies && it->second.real_ue) {
+            if (!it->second.sent_nmt_challenge) {
+              auto out = ue574::build_experimental_nmt_challenge(
+                  it->second.handshake, it->second.last_client_packet_seq);
+              printf("  sending experimental NMT_Challenge clean channel-0 "
+                     "reply (%zu bytes)\n",
+                     out.size());
+              udp_send_logged(fd, from, out.data(), out.size(), binlog);
+              it->second.sent_nmt_challenge = true;
+            } else {
+              printf("  NMT_Challenge already sent for this session; not "
+                     "retransmitting on probe packet\n");
+            }
+          }
+        } else if (saw_login) {
+          printf("  saw a possible NMT_Login candidate before NMT_Challenge "
+                 "was marked sent; ignoring for now\n");
         }
       } else {
         printf(

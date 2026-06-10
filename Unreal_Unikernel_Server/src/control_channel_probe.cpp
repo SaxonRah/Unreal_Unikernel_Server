@@ -139,8 +139,8 @@ static BunchProbe try_parse_bunch_at(const uint8_t *data, size_t n,
     }
     if (p.close) {
       uint64_t close_reason = 0;
-      // EChannelCloseReason::MAX 
-      // Skip a small field; early hello should not be close anyway.
+      // EChannelCloseReason::MAX is not in the uploaded subset. Skip a
+      // small field; early hello should not be close anyway.
       if (!r.read_bits_u64(4, close_reason)) {
         p.reason = "no close reason";
         return p;
@@ -203,8 +203,9 @@ static BunchProbe try_parse_bunch_at(const uint8_t *data, size_t n,
 
   // If bOpen or bReliable, UE serializes ChName here. For the first client
   // hello, this is usually channel 0/control. We do not know the exact FName
-  // wire form yet, so this probe searches forward for
-  // a plausible first control-message byte 
+  // wire form from this uploaded subset, so this probe searches forward for
+  // a plausible first control-message byte instead of pretending the parser
+  // is complete.
   const uint32_t after_known_header = r.pos_bits();
   const uint32_t max_scan_bits = after_known_header + 96;
   for (uint32_t bit = after_known_header;
@@ -235,6 +236,8 @@ PostHandshakeProbeReport probe_post_handshake_packet(const uint8_t *data,
   report.payload_bits =
       ue_payload_bit_count(data, n, report.has_ue_termination);
 
+  // We do not yet have FNetPacketNotify's 5.7.4 header implementation in the
+  // uploaded subset. Try candidate offsets where the first bunch may begin.
   for (uint32_t off = 0; off < 160 && off + 24 < report.payload_bits; ++off) {
     BunchProbe p = try_parse_bunch_at(data, n, off, report.payload_bits);
     if (p.plausible || (p.channel_index == 0 && p.first_payload_byte != 0xff)) {
