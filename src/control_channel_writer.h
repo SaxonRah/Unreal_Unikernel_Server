@@ -53,6 +53,15 @@ void extract_sequences_from_cookie(const UEHandshake &response,
 
 std::vector<uint8_t>
 build_experimental_control_reply_packet(const ControlReplyBuildInput &in);
+std::vector<uint8_t>
+build_experimental_nmt_challenge(const UEHandshake &response,
+                                 uint16_t last_client_packet_seq);
+std::vector<uint8_t>
+build_experimental_nmt_welcome(const UEHandshake &response,
+                               uint16_t last_client_packet_seq);
+
+// Older candidate builders kept for A/B testing if needed, but the endpoint now
+// sends one clean candidate by default.
 std::vector<std::vector<uint8_t>>
 build_experimental_nmt_challenge_candidates(const UEHandshake &response,
                                             uint16_t last_client_packet_seq);

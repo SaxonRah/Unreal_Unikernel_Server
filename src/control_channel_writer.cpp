@@ -193,7 +193,14 @@ build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
   normal.write_bit(false);    // bPartial
   normal.write_int_wrapped(in.next_out_reliable_ch0 & (MaxChSequence - 1),
                            MaxChSequence);
-  write_fname_control(normal, in.name_mode);
+
+  // Important: because bIsOpenOrClose is false above, this is an existing
+  // channel-0 bunch. UE only serializes the channel name/type when opening a
+  // channel. v8/v10 incorrectly wrote NAME_Control here, which shifted the
+  // payload and made the client disconnect with ZeroLastByte/NotRecoverable.
+  // Keep write_fname_control() available for a later true channel-open test,
+  // but do not emit it for the normal NMT_Challenge/NMT_Welcome replies.
+
   normal.write_int_wrapped(bunch_payload.bit_count(),
                            1024 * 8); // MaxPacket-ish bound for prototype
   normal.append_bits(bunch_payload);
@@ -228,37 +235,37 @@ static ControlReplyBuildInput base_input(const UEHandshake &response,
   return in;
 }
 
+std::vector<uint8_t>
+build_experimental_nmt_challenge(const UEHandshake &response,
+                                 uint16_t last_client_packet_seq) {
+  auto in = base_input(response, last_client_packet_seq);
+  in.message_id = NMT_Challenge;
+  in.message_strings = {"00000000"};
+  in.name_mode = NameWireMode::StaticSerializeNameStringControl;
+  return build_experimental_control_reply_packet(in);
+}
+
+std::vector<uint8_t>
+build_experimental_nmt_welcome(const UEHandshake &response,
+                               uint16_t last_client_packet_seq) {
+  auto in = base_input(response, last_client_packet_seq);
+  in.message_id = NMT_Welcome;
+  in.message_strings = {"/Game/Maps/Minimal", "/Script/Engine.GameModeBase",
+                        ""};
+  in.name_mode = NameWireMode::StaticSerializeNameStringControl;
+  return build_experimental_control_reply_packet(in);
+}
+
 std::vector<std::vector<uint8_t>>
 build_experimental_nmt_challenge_candidates(const UEHandshake &response,
                                             uint16_t last_client_packet_seq) {
-  std::vector<std::vector<uint8_t>> out;
-  for (NameWireMode mode : {NameWireMode::StaticSerializeNameStringControl,
-                            NameWireMode::SmallHardcodedIndexProbe,
-                            NameWireMode::LegacyChannelTypeControlProbe}) {
-    auto in = base_input(response, last_client_packet_seq);
-    in.message_id = NMT_Challenge;
-    in.message_strings = {"00000000"};
-    in.name_mode = mode;
-    out.push_back(build_experimental_control_reply_packet(in));
-  }
-  return out;
+  return {build_experimental_nmt_challenge(response, last_client_packet_seq)};
 }
 
 std::vector<std::vector<uint8_t>>
 build_experimental_nmt_welcome_candidates(const UEHandshake &response,
                                           uint16_t last_client_packet_seq) {
-  std::vector<std::vector<uint8_t>> out;
-  for (NameWireMode mode : {NameWireMode::StaticSerializeNameStringControl,
-                            NameWireMode::SmallHardcodedIndexProbe,
-                            NameWireMode::LegacyChannelTypeControlProbe}) {
-    auto in = base_input(response, last_client_packet_seq);
-    in.message_id = NMT_Welcome;
-    in.message_strings = {"/Game/Maps/Minimal", "/Script/Engine.GameModeBase",
-                          ""};
-    in.name_mode = mode;
-    out.push_back(build_experimental_control_reply_packet(in));
-  }
-  return out;
+  return {build_experimental_nmt_welcome(response, last_client_packet_seq)};
 }
 
 } // namespace ue574
