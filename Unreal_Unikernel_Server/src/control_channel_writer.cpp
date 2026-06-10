@@ -235,25 +235,54 @@ static ControlReplyBuildInput base_input(const UEHandshake &response,
   return in;
 }
 
-std::vector<uint8_t>
-build_experimental_nmt_challenge(const UEHandshake &response,
-                                 uint16_t last_client_packet_seq) {
+static void apply_stateful_sequences(ControlReplyBuildInput &in,
+                                     uint16_t next_server_packet_seq,
+                                     uint16_t next_out_reliable_ch0) {
+  if (next_server_packet_seq != 0) {
+    in.next_server_packet_seq = next_server_packet_seq;
+  }
+  in.next_out_reliable_ch0 = next_out_reliable_ch0 & (MaxChSequence - 1);
+}
+
+std::vector<uint8_t> build_experimental_nmt_challenge_stateful(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0) {
   auto in = base_input(response, last_client_packet_seq);
+  apply_stateful_sequences(in, next_server_packet_seq, next_out_reliable_ch0);
   in.message_id = NMT_Challenge;
   in.message_strings = {"00000000"};
   in.name_mode = NameWireMode::StaticSerializeNameStringControl;
   return build_experimental_control_reply_packet(in);
 }
 
-std::vector<uint8_t>
-build_experimental_nmt_welcome(const UEHandshake &response,
-                               uint16_t last_client_packet_seq) {
+std::vector<uint8_t> build_experimental_nmt_welcome_stateful(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0) {
   auto in = base_input(response, last_client_packet_seq);
+  apply_stateful_sequences(in, next_server_packet_seq, next_out_reliable_ch0);
   in.message_id = NMT_Welcome;
   in.message_strings = {"/Game/Maps/Minimal", "/Script/Engine.GameModeBase",
                         ""};
   in.name_mode = NameWireMode::StaticSerializeNameStringControl;
   return build_experimental_control_reply_packet(in);
+}
+
+std::vector<uint8_t>
+build_experimental_nmt_challenge(const UEHandshake &response,
+                                 uint16_t last_client_packet_seq) {
+  auto in = base_input(response, last_client_packet_seq);
+  return build_experimental_nmt_challenge_stateful(
+      response, last_client_packet_seq, in.next_server_packet_seq,
+      in.next_out_reliable_ch0);
+}
+
+std::vector<uint8_t>
+build_experimental_nmt_welcome(const UEHandshake &response,
+                               uint16_t last_client_packet_seq) {
+  auto in = base_input(response, last_client_packet_seq);
+  return build_experimental_nmt_welcome_stateful(
+      response, last_client_packet_seq, in.next_server_packet_seq,
+      in.next_out_reliable_ch0);
 }
 
 std::vector<std::vector<uint8_t>>

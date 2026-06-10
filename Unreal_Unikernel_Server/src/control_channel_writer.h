@@ -60,6 +60,17 @@ std::vector<uint8_t>
 build_experimental_nmt_welcome(const UEHandshake &response,
                                uint16_t last_client_packet_seq);
 
+// Stateful variants: required once we send more than one reliable control
+// bunch. Each outgoing packet must advance PacketNotify sequence and each
+// reliable channel-0 bunch must advance ChSequence; reusing the same values
+// makes the UE client treat later replies as duplicates/out-of-window packets.
+std::vector<uint8_t> build_experimental_nmt_challenge_stateful(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0);
+std::vector<uint8_t> build_experimental_nmt_welcome_stateful(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t next_out_reliable_ch0);
+
 // Older candidate builders kept for A/B testing if needed, but the endpoint now
 // sends one clean candidate by default.
 std::vector<std::vector<uint8_t>>

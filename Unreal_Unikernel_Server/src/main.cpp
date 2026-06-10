@@ -27,6 +27,8 @@ struct Session {
   uint16_t server_sequence = 0;
   uint16_t client_sequence = 0;
   uint16_t last_client_packet_seq = 0;
+  uint16_t next_server_packet_seq = 0;
+  uint16_t next_out_reliable_ch0 = 1;
   bool sent_nmt_challenge = false;
   bool sent_nmt_welcome = false;
 };
@@ -265,13 +267,22 @@ int main(int argc, char **argv) {
                  "experimental next step is NMT_Welcome bunch\n");
           if (experimental_control_replies && it->second.real_ue) {
             if (!it->second.sent_nmt_welcome) {
-              auto out = ue574::build_experimental_nmt_welcome(
-                  it->second.handshake, it->second.last_client_packet_seq);
+              auto out = ue574::build_experimental_nmt_welcome_stateful(
+                  it->second.handshake, it->second.last_client_packet_seq,
+                  it->second.next_server_packet_seq,
+                  it->second.next_out_reliable_ch0);
               printf("  sending experimental NMT_Welcome clean channel-0 reply "
-                     "(%zu bytes)\n",
-                     out.size());
+                     "(%zu bytes seq=%u chseq=%u ack_client=%u)\n",
+                     out.size(), (unsigned)it->second.next_server_packet_seq,
+                     (unsigned)it->second.next_out_reliable_ch0,
+                     (unsigned)it->second.last_client_packet_seq);
               udp_send_logged(fd, from, out.data(), out.size(), binlog);
+              it->second.next_server_packet_seq =
+                  (uint16_t)((it->second.next_server_packet_seq + 1) & 0x3fff);
+              it->second.next_out_reliable_ch0 =
+                  (uint16_t)((it->second.next_out_reliable_ch0 + 1) & 1023);
               it->second.sent_nmt_welcome = true;
+              it->second.phase = ue574::SessionPhase::Welcomed;
             } else {
               printf("  NMT_Welcome already sent for this session; not "
                      "retransmitting on probe packet\n");
@@ -283,12 +294,20 @@ int main(int argc, char **argv) {
                  "NMT_Challenge bunch\n");
           if (experimental_control_replies && it->second.real_ue) {
             if (!it->second.sent_nmt_challenge) {
-              auto out = ue574::build_experimental_nmt_challenge(
-                  it->second.handshake, it->second.last_client_packet_seq);
+              auto out = ue574::build_experimental_nmt_challenge_stateful(
+                  it->second.handshake, it->second.last_client_packet_seq,
+                  it->second.next_server_packet_seq,
+                  it->second.next_out_reliable_ch0);
               printf("  sending experimental NMT_Challenge clean channel-0 "
-                     "reply (%zu bytes)\n",
-                     out.size());
+                     "reply (%zu bytes seq=%u chseq=%u ack_client=%u)\n",
+                     out.size(), (unsigned)it->second.next_server_packet_seq,
+                     (unsigned)it->second.next_out_reliable_ch0,
+                     (unsigned)it->second.last_client_packet_seq);
               udp_send_logged(fd, from, out.data(), out.size(), binlog);
+              it->second.next_server_packet_seq =
+                  (uint16_t)((it->second.next_server_packet_seq + 1) & 0x3fff);
+              it->second.next_out_reliable_ch0 =
+                  (uint16_t)((it->second.next_out_reliable_ch0 + 1) & 1023);
               it->second.sent_nmt_challenge = true;
             } else {
               printf("  NMT_Challenge already sent for this session; not "
