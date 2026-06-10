@@ -28,7 +28,7 @@ struct Session {
   uint16_t client_sequence = 0;
   uint16_t last_client_packet_seq = 0;
   uint16_t next_server_packet_seq = 0;
-  uint16_t next_out_reliable_ch0 = 1;
+  uint16_t next_out_reliable_ch0 = 0;
   bool sent_nmt_challenge = false;
   bool sent_nmt_welcome = false;
 };
@@ -149,9 +149,27 @@ int main(int argc, char **argv) {
       ue574::extract_sequences_from_cookie(pp.handshake, sess.server_sequence,
                                            sess.client_sequence);
       sess.last_client_packet_seq = sess.client_sequence;
+
+      // PacketNotify outgoing sequence space is seeded by the
+      // StatelessConnect cookie. v14 accidentally left this at 0,
+      // causing post-handshake replies to be sent as seq=0/1 even
+      // though the server seed was 33. Start from the server seed so
+      // NMT_Challenge uses seq=33 and NMT_Welcome uses seq=34.
+      sess.next_server_packet_seq = sess.server_sequence;
+
+      // UE initializes reliable channel sequence state from the same
+      // StatelessConnect outgoing packet seed:
+      //   InitOutReliable = OutgoingSequence & (MAX_CHSEQUENCE - 1)
+      // and UChannel::PrepBunch sends ++OutReliable[ChIndex].
+      // Therefore the first reliable control-channel bunch after
+      // handshake should use (server_sequence + 1) & 1023, not 1.
+      sess.next_out_reliable_ch0 =
+          (uint16_t)((sess.server_sequence + 1) & 1023);
+
       sessions[ck] = sess;
-      printf("  sequence seeds: server=%u client=%u\n",
-             (unsigned)sess.server_sequence, (unsigned)sess.client_sequence);
+      printf("  sequence seeds: server=%u client=%u first_chseq=%u\n",
+             (unsigned)sess.server_sequence, (unsigned)sess.client_sequence,
+             (unsigned)sess.next_out_reliable_ch0);
 
       auto out = ue574::build_ue574_ack(pp.handshake);
       udp_send_logged(fd, from, out.data(), out.size(), binlog);
@@ -262,9 +280,14 @@ int main(int argc, char **argv) {
         }
 
         if (saw_login && it->second.sent_nmt_challenge) {
-          it->second.phase = ue574::SessionPhase::SawLogin;
-          printf("  observed likely NMT_Login after NMT_Challenge; "
-                 "experimental next step is NMT_Welcome bunch\n");
+          if (it->second.phase == ue574::SessionPhase::Welcomed) {
+            printf("  observed likely NMT_Login after NMT_Welcome; treating as "
+                   "retransmit/noise, not regressing phase\n");
+          } else {
+            it->second.phase = ue574::SessionPhase::SawLogin;
+            printf("  observed likely NMT_Login after NMT_Challenge; "
+                   "experimental next step is NMT_Welcome bunch\n");
+          }
           if (experimental_control_replies && it->second.real_ue) {
             if (!it->second.sent_nmt_welcome) {
               auto out = ue574::build_experimental_nmt_welcome_stateful(
@@ -284,15 +307,49 @@ int main(int argc, char **argv) {
               it->second.sent_nmt_welcome = true;
               it->second.phase = ue574::SessionPhase::Welcomed;
             } else {
-              printf("  NMT_Welcome already sent for this session; not "
-                     "retransmitting on probe packet\n");
+              // The UE client keeps retransmitting Login until it sees a valid
+              // reliable Welcome/ack. Retransmit the same reliable channel
+              // bunch sequence using a fresh PacketNotify packet sequence,
+              // matching how reliable resend behaves at a high level.
+              uint16_t resend_chseq =
+                  (uint16_t)((it->second.next_out_reliable_ch0 + 1023) & 1023);
+              auto out = ue574::build_experimental_nmt_welcome_stateful(
+                  it->second.handshake, it->second.last_client_packet_seq,
+                  it->second.next_server_packet_seq, resend_chseq);
+              printf("  retransmitting NMT_Welcome clean channel-0 reply (%zu "
+                     "bytes seq=%u chseq=%u ack_client=%u)\n",
+                     out.size(), (unsigned)it->second.next_server_packet_seq,
+                     (unsigned)resend_chseq,
+                     (unsigned)it->second.last_client_packet_seq);
+              udp_send_logged(fd, from, out.data(), out.size(), binlog);
+              it->second.next_server_packet_seq =
+                  (uint16_t)((it->second.next_server_packet_seq + 1) & 0x3fff);
+              it->second.phase = ue574::SessionPhase::Welcomed;
             }
           }
         } else if (saw_hello) {
-          it->second.phase = ue574::SessionPhase::SawHello;
-          printf("  observed likely NMT_Hello; experimental next step is "
-                 "NMT_Challenge bunch\n");
-          if (experimental_control_replies && it->second.real_ue) {
+          // The broad probe finds false-positive NMT_Hello bytes
+          // inside later packets. Do not regress the state machine
+          // after Login/Welcome has already been observed.
+          if (it->second.phase != ue574::SessionPhase::SawLogin &&
+              it->second.phase != ue574::SessionPhase::Welcomed) {
+            it->second.phase = ue574::SessionPhase::SawHello;
+          }
+
+          if (it->second.phase == ue574::SessionPhase::Welcomed) {
+            printf("  observed likely NMT_Hello false-positive after "
+                   "NMT_Welcome; ignoring\n");
+          } else if (it->second.phase == ue574::SessionPhase::SawLogin) {
+            printf("  observed likely NMT_Hello false-positive after "
+                   "NMT_Login; ignoring\n");
+          } else {
+            printf("  observed likely NMT_Hello; experimental next step is "
+                   "NMT_Challenge bunch\n");
+          }
+
+          if (experimental_control_replies && it->second.real_ue &&
+              it->second.phase != ue574::SessionPhase::SawLogin &&
+              it->second.phase != ue574::SessionPhase::Welcomed) {
             if (!it->second.sent_nmt_challenge) {
               auto out = ue574::build_experimental_nmt_challenge_stateful(
                   it->second.handshake, it->second.last_client_packet_seq,

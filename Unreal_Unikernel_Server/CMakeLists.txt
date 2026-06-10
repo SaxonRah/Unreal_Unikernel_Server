@@ -24,7 +24,9 @@ target_link_libraries(ue574_temp_client PRIVATE ue574_common)
 add_executable(ue574_probe_client src/ue574_probe_client.cpp)
 target_link_libraries(ue574_probe_client PRIVATE ue574_common)
 
-set(UE574_TARGETS ue574_common ue574_endpoint ue574_temp_client ue574_probe_client)
+add_executable(ue574_binlog_dump src/binlog_dump.cpp)
+
+set(UE574_TARGETS ue574_common ue574_endpoint ue574_temp_client ue574_probe_client ue574_binlog_dump)
 
 foreach(tgt IN LISTS UE574_TARGETS)
     if(MSVC)
@@ -37,6 +39,7 @@ endforeach()
 
 if(WIN32)
     target_link_libraries(ue574_common PUBLIC ws2_32)
+    target_link_libraries(ue574_binlog_dump PRIVATE ws2_32)
 endif()
 
 # NanoS target is Linux ELF. Static linking is useful there, but MSVC does not
@@ -45,4 +48,5 @@ if(BUILD_STATIC AND NOT MSVC)
     target_link_options(ue574_endpoint PRIVATE -static)
     target_link_options(ue574_temp_client PRIVATE -static)
     target_link_options(ue574_probe_client PRIVATE -static)
+    target_link_options(ue574_binlog_dump PRIVATE -static)
 endif()

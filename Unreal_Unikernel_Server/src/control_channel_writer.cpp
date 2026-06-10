@@ -10,6 +10,9 @@ static constexpr uint32_t PacketNotifySeqBits = 14;
 static constexpr uint32_t PacketNotifyHistoryWordCountBits = 4;
 static constexpr uint32_t MaxPacketId = 1u << PacketNotifySeqBits;
 static constexpr uint32_t MaxChSequence = 1024;
+static constexpr uint32_t NumBitsForJitterClockTimeInHeader = 10;
+static constexpr uint32_t MaxJitterClockTimeValue =
+    (1u << NumBitsForJitterClockTimeInHeader) - 1u;
 
 const char *name_wire_mode_name(NameWireMode mode) {
   switch (mode) {
@@ -72,6 +75,32 @@ parse_packet_notify_after_stateless_prefix(const uint8_t *data, size_t n) {
       return PacketNotifyHeaderMini{};
   }
 
+  // UE5.7.x NetConnection reads one bHasPacketInfoPayload bit immediately
+  // after FNetPacketNotify when PacketEngineNetVer >= JitterInHeader. If it
+  // is true, it then reads a 10-bit jitter clock and one bHasServerFrameTime
+  // bit. Real UE clients in our captures set this bit and write jitter=1023,
+  // so consume the whole packet-info payload before probing bunches.
+  bool has_packet_info_payload = false;
+  if (!r.read_bit(has_packet_info_payload))
+    return PacketNotifyHeaderMini{};
+  if (has_packet_info_payload) {
+    uint64_t jitter_clock = 0;
+    if (!r.read_bits_u64(NumBitsForJitterClockTimeInHeader, jitter_clock))
+      return PacketNotifyHeaderMini{};
+
+    bool has_server_frame_time = false;
+    if (!r.read_bit(has_server_frame_time))
+      return PacketNotifyHeaderMini{};
+
+    // Client->server packets should not include a frame-time byte here. If a
+    // future capture does, consume it so the bunch scanner remains aligned.
+    if (has_server_frame_time) {
+      uint8_t frame_time = 0;
+      if (!r.read_u8(frame_time))
+        return PacketNotifyHeaderMini{};
+    }
+  }
+
   out.bits_consumed = r.pos_bits();
   out.ok = true;
   return out;
@@ -82,6 +111,9 @@ static void write_packet_notify_header(BitWriter &w, uint16_t seq,
   // FNetPacketNotify::WriteHeader packs:
   //   seq:14 | acked:14 | history_words_minus_one:4
   // and always writes at least one history word.
+  // Important: TSequenceHistory bit 0 corresponds to the current AckedSeq
+  // when AckCount == 1 on the receiver. A zero word NAKs the client packet
+  // we just processed; bit0=1 ACKs it.
   uint32_t packed = 0;
   packed |= (uint32_t(seq) & (MaxPacketId - 1))
             << (PacketNotifyHistoryWordCountBits + PacketNotifySeqBits);
@@ -89,8 +121,7 @@ static void write_packet_notify_header(BitWriter &w, uint16_t seq,
             << PacketNotifyHistoryWordCountBits;
   packed |= 0; // one history word => count-minus-one 0
   w.write_u32(packed);
-  w.write_u32(
-      0); // empty/synthetic ack history word for the first experimental reply
+  w.write_u32(1); // ack history bit0=1 => AckedSeq itself was delivered
 }
 
 static void write_i32(BitWriter &w, int32_t v) { w.write_u32((uint32_t)v); }
@@ -180,6 +211,16 @@ build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
                                                      : in.client_sequence;
   write_packet_notify_header(normal, packet_seq, ack_seq);
 
+  // PacketEngineNetVer >= JitterInHeader path expects packet-info after
+  // PacketNotify. Real UE packets in the captures set bHasPacketInfoPayload=1,
+  // write a 10-bit jitter clock value, then bHasServerFrameTime. Match that
+  // shape instead of sending a bare false bit. Use max jitter to mean "ignore
+  // jitter" and no server frame-time byte.
+  normal.write_bit(true);
+  normal.write_int_wrapped(MaxJitterClockTimeValue,
+                           MaxJitterClockTimeValue + 1);
+  normal.write_bit(false);
+
   BitWriter bunch_payload;
   write_control_message_payload(bunch_payload, in);
 
@@ -194,12 +235,11 @@ build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
   normal.write_int_wrapped(in.next_out_reliable_ch0 & (MaxChSequence - 1),
                            MaxChSequence);
 
-  // Important: because bIsOpenOrClose is false above, this is an existing
-  // channel-0 bunch. UE only serializes the channel name/type when opening a
-  // channel. v8/v10 incorrectly wrote NAME_Control here, which shifted the
-  // payload and made the client disconnect with ZeroLastByte/NotRecoverable.
-  // Keep write_fname_control() available for a later true channel-open test,
-  // but do not emit it for the normal NMT_Challenge/NMT_Welcome replies.
+  // Source-accurate UE5.7.4 SendRawBunch behavior: Bunch.ChName is serialized
+  // when the bunch is open OR reliable. v16 tested this but still used an
+  // invalid reliable channel sequence (1 instead of seed+1). v18 combines the
+  // source-accurate channel-name field with the corrected seeded ChSequence.
+  write_fname_control(normal, in.name_mode);
 
   normal.write_int_wrapped(bunch_payload.bit_count(),
                            1024 * 8); // MaxPacket-ish bound for prototype
@@ -213,6 +253,17 @@ build_experimental_control_reply_packet(const ControlReplyBuildInput &in) {
   out.write_bits_u64(in.client_id & 0x7, ClientIdBits);
   out.write_bit(false); // bHandshakePacket=0
   out.append_bits(normal);
+
+  // UE packets still pass through PacketHandler after the StatelessConnect
+  // component prepends SessionID/ClientID/bHandshakePacket. PacketHandler
+  // reserves/strips its own trailing termination marker, while the wrapped
+  // UNetConnection payload also contains the normal NetConnection
+  // termination bit. Earlier builds only wrote the inner NetConnection
+  // termination bit, producing packets ending in 0x01; real client packets
+  // typically end with two termination markers (often visible as 0x0c when
+  // bit-aligned). Write the outer PacketHandler termination marker too.
+  out.write_termination_bit();
+
   return out.bytes();
 }
 
