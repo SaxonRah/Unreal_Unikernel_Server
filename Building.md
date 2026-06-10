@@ -1,5 +1,7 @@
 # Bulding
 
+You need to build on Linux for NanoS, however you can also build on Windows for testing before NanoS deployment.
+
 ## Linux:
 ```
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release

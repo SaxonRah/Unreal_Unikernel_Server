@@ -1,6 +1,6 @@
 #pragma once
 
-#include <netinet/in.h>
+#include "udp_util.h"
 #include <stdint.h>
 
 #include <array>
