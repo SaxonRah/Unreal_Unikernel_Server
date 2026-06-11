@@ -26,6 +26,18 @@ const char *actor_channel_name_wire_mode_name(ActorChannelNameWireMode mode) {
   return "?";
 }
 
+const char *datastream_header_mode_name(DataStreamHeaderMode mode) {
+  switch (mode) {
+  case DataStreamHeaderMode::Reliable:
+    return "reliable";
+  case DataStreamHeaderMode::OpenReliable:
+    return "open-reliable";
+  case DataStreamHeaderMode::PadBeforeChIndex:
+    return "pad-before-chindex";
+  }
+  return "unknown";
+}
+
 const char *actor_payload_probe_mode_name(ActorPayloadProbeMode mode) {
   switch (mode) {
   case ActorPayloadProbeMode::Empty:
@@ -648,6 +660,70 @@ std::vector<uint8_t> build_experimental_actor_channel_content_probe(
                                  actor_class_path_hint);
   normal.write_int_wrapped(actor_payload.bit_count(), 1024 * 8);
   normal.append_bits(actor_payload);
+
+  normal.write_termination_bit();
+
+  BitWriter out;
+  out.write_bits_u64(response.session_id & 0x3, SessionIdBits);
+  out.write_bits_u64(response.client_id & 0x7, ClientIdBits);
+  out.write_bit(false);
+  out.append_bits(normal);
+  out.write_termination_bit();
+  return out.bytes();
+}
+
+std::vector<uint8_t> build_experimental_datastream_open_probe(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t datastream_channel_index,
+    uint16_t next_out_reliable_datastream_ch,
+    DataStreamHeaderMode header_mode) {
+  uint16_t server_seq = 0, client_seq = 0;
+  extract_sequences_from_cookie(response, server_seq, client_seq);
+
+  const uint16_t packet_seq =
+      next_server_packet_seq ? next_server_packet_seq : server_seq;
+  const uint16_t ack_seq =
+      last_client_packet_seq ? last_client_packet_seq : client_seq;
+
+  BitWriter normal;
+  write_packet_notify_header(normal, packet_seq, ack_seq);
+  normal.write_bit(true);
+  normal.write_int_wrapped(MaxJitterClockTimeValue,
+                           MaxJitterClockTimeValue + 1);
+  normal.write_bit(false);
+
+  // UDataStreamChannel::SendOpenBunch shape from source:
+  //   FOutBunch(MaxBunchBits), ChName=DataStream, ChIndex=this->ChIndex,
+  //   bReliable=true, zero payload bits. It does NOT explicitly set bOpen.
+  //
+  // Header mode variants are intentionally limited and source-audit focused:
+  //   reliable:          source-faithful SendOpenBunch shape
+  //   open-reliable:     old/open-channel hypothesis
+  //   pad-before-chindex: diagnostic for the observed one-bit ChIndex skew
+  if (header_mode == DataStreamHeaderMode::OpenReliable) {
+    normal.write_bit(true);  // bIsOpenOrClose
+    normal.write_bit(true);  // bOpen
+    normal.write_bit(false); // bClose
+  } else {
+    normal.write_bit(false); // bIsOpenOrClose
+  }
+  normal.write_bit(false); // bIsReplicationPaused
+  normal.write_bit(true);  // bReliable
+  if (header_mode == DataStreamHeaderMode::PadBeforeChIndex) {
+    // The UE log from v50/v52 decoded intended channel 2 as channel 1.
+    // Our local source-order decoder says ChIndex starts one bit earlier
+    // than UE appeared to consume. This pad is NOT source-correct; it is
+    // a targeted calibration switch to prove/disprove that exact skew.
+    normal.write_bit(false);
+  }
+  normal.write_int_packed(datastream_channel_index);
+  normal.write_bit(false); // bHasPackageMapExports
+  normal.write_bit(false); // bHasMustBeMappedGUIDs
+  normal.write_bit(false); // bPartial
+  normal.write_int_wrapped(
+      next_out_reliable_datastream_ch & (MaxChSequence - 1), MaxChSequence);
+  write_static_serialize_name_string_path(normal, "DataStream");
+  normal.write_int_wrapped(0, 1024 * 8); // zero payload bits
 
   normal.write_termination_bit();
 

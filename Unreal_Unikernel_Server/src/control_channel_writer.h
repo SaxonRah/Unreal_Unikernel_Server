@@ -18,6 +18,12 @@ enum class ActorChannelNameWireMode : uint8_t {
   StaticSerializeNameStringActor = 1,
 };
 
+enum class DataStreamHeaderMode : uint8_t {
+  Reliable = 0,
+  OpenReliable = 1,
+  PadBeforeChIndex = 2,
+};
+
 enum class ActorPayloadProbeMode : uint8_t {
   // v37 proved the legacy actor-channel header is ACKed and not rejected as
   // BunchWrongChannelType. These payload modes deliberately exercise the next
@@ -143,8 +149,19 @@ std::vector<uint8_t> build_experimental_actor_channel_content_probe(
     ActorPayloadProbeMode payload_mode = ActorPayloadProbeMode::Empty,
     const std::string &actor_class_path_hint = std::string());
 
+// v49: UE5.7 Iris creates a static DataStream channel at index 2. Actor
+// channels are not available yet; send the same minimal reliable DataStream
+// handshake bunch UDataStreamChannel::SendOpenBunch emits: reliable,
+// ChName=DataStream, no open bit, zero payload bits.
+std::vector<uint8_t> build_experimental_datastream_open_probe(
+    const UEHandshake &response, uint16_t last_client_packet_seq,
+    uint16_t next_server_packet_seq, uint16_t datastream_channel_index,
+    uint16_t next_out_reliable_datastream_ch,
+    DataStreamHeaderMode header_mode = DataStreamHeaderMode::Reliable);
+
 const char *actor_channel_name_wire_mode_name(ActorChannelNameWireMode mode);
 const char *actor_payload_probe_mode_name(ActorPayloadProbeMode mode);
+const char *datastream_header_mode_name(DataStreamHeaderMode mode);
 
 std::vector<uint8_t>
 build_experimental_nmt_challenge(const UEHandshake &response,

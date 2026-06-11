@@ -47,13 +47,16 @@ void BitWriter::write_int_wrapped(uint32_t value, uint32_t max_value) {
 }
 
 void BitWriter::write_int_packed(uint32_t value) {
-  // Matches the small-value shape used by UE SerializeIntPacked: 7 data
-  // bits then a continuation bit. Channel 0 encodes as one zero byte.
+  // UE FArchive::SerializeIntPacked writes a continuation bit first, then
+  // seven payload bits, per group. This is easy to get backwards because it
+  // still encodes zero as 8 zero bits. The old 7-data-then-continuation
+  // order made non-zero channel ids decode as value >> 1 on UE's side
+  // (e.g. channel 2 was seen as channel 1 / Voice).
   do {
-    uint8_t low7 = (uint8_t)(value & 0x7fu);
+    const uint8_t low7 = (uint8_t)(value & 0x7fu);
     value >>= 7;
-    write_bits_u64(low7, 7);
     write_bit(value != 0);
+    write_bits_u64(low7, 7);
   } while (value != 0);
 }
 
@@ -169,11 +172,11 @@ bool BitReader::read_int_packed(uint32_t &out) {
   out = 0;
   uint32_t shift = 0;
   for (int group = 0; group < 5; ++group) {
-    uint64_t low7 = 0;
-    if (!read_bits_u64(7, low7))
-      return false;
     bool more = false;
     if (!read_bit(more))
+      return false;
+    uint64_t low7 = 0;
+    if (!read_bits_u64(7, low7))
       return false;
     out |= (uint32_t)(low7 << shift);
     if (!more)

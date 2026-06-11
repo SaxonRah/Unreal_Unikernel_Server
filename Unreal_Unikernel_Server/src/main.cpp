@@ -30,6 +30,7 @@ struct Session {
   uint16_t next_server_packet_seq = 0;
   uint16_t next_out_reliable_ch0 = 0;
   uint16_t next_out_reliable_actor = 0;
+  uint16_t next_out_reliable_datastream = 0;
   bool sent_nmt_challenge = false;
   bool sent_nmt_welcome = false;
   uint16_t last_welcome_packet_seq = 0;
@@ -48,6 +49,10 @@ struct Session {
   uint16_t first_direct_login_after_welcome_seq = 0;
   bool sent_post_welcome_failure = false;
   bool sent_empty_actor_probe = false;
+  bool sent_datastream_open_probe = false;
+  uint16_t last_datastream_open_packet_seq = 0;
+  bool datastream_open_packet_acked = false;
+  bool announced_datastream_open_packet_acked = false;
   uint16_t last_actor_probe_packet_seq = 0;
   bool actor_probe_packet_acked = false;
   bool announced_actor_probe_packet_acked = false;
@@ -190,6 +195,13 @@ int main(int argc, char **argv) {
       ue574::ActorPayloadProbeMode::Empty;
   bool post_join_actor_followup_probe = false;
   uint32_t post_join_actor_followup_after = 2;
+  bool post_join_datastream_open_probe = false;
+  uint32_t post_join_datastream_open_after = 1;
+  uint16_t post_join_datastream_channel = 2;
+  uint16_t post_join_datastream_wire_channel =
+      0; // 0 = auto/calibrated from logical channel
+  ue574::DataStreamHeaderMode post_join_datastream_header_mode =
+      ue574::DataStreamHeaderMode::Reliable;
 
   for (int i = 1; i < argc; ++i) {
     if (!strcmp(argv[i], "--port") && i + 1 < argc) {
@@ -273,6 +285,51 @@ int main(int argc, char **argv) {
         return 2;
       }
       post_join_actor_followup_after = (uint32_t)v;
+    } else if (!strcmp(argv[i], "--post-join-datastream-open-probe")) {
+      post_join_datastream_open_probe = true;
+    } else if (!strcmp(argv[i], "--post-join-datastream-open-after") &&
+               i + 1 < argc) {
+      long v = strtol(argv[++i], nullptr, 10);
+      if (v < 0 || v > 1000000) {
+        fprintf(stderr, "bad --post-join-datastream-open-after; use a "
+                        "non-negative post-Welcome packet count\n");
+        return 2;
+      }
+      post_join_datastream_open_after = (uint32_t)v;
+    } else if (!strcmp(argv[i], "--post-join-datastream-channel") &&
+               i + 1 < argc) {
+      long v = strtol(argv[++i], nullptr, 10);
+      if (v < 0 || v > 1023) {
+        fprintf(stderr, "bad --post-join-datastream-channel; use 0..1023\n");
+        return 2;
+      }
+      post_join_datastream_channel = (uint16_t)v;
+    } else if (!strcmp(argv[i], "--post-join-datastream-wire-channel") &&
+               i + 1 < argc) {
+      long v = strtol(argv[++i], nullptr, 10);
+      if (v < 0 || v > 1023) {
+        fprintf(stderr,
+                "bad --post-join-datastream-wire-channel; use 0..1023\n");
+        return 2;
+      }
+      post_join_datastream_wire_channel = (uint16_t)v;
+    } else if (!strcmp(argv[i], "--post-join-datastream-header-mode") &&
+               i + 1 < argc) {
+      const char *mode = argv[++i];
+      if (!strcmp(mode, "reliable") || !strcmp(mode, "source")) {
+        post_join_datastream_header_mode =
+            ue574::DataStreamHeaderMode::Reliable;
+      } else if (!strcmp(mode, "open-reliable") || !strcmp(mode, "open")) {
+        post_join_datastream_header_mode =
+            ue574::DataStreamHeaderMode::OpenReliable;
+      } else if (!strcmp(mode, "pad-before-chindex") || !strcmp(mode, "pad1")) {
+        post_join_datastream_header_mode =
+            ue574::DataStreamHeaderMode::PadBeforeChIndex;
+      } else {
+        fprintf(stderr, "bad --post-join-datastream-header-mode; use reliable, "
+                        "open-reliable, or pad-before-chindex\n");
+        return 2;
+      }
     } else if (!strcmp(argv[i], "--post-join-actor-name-mode") &&
                i + 1 < argc) {
       const char *mode = argv[++i];
@@ -391,8 +448,15 @@ int main(int argc, char **argv) {
           "[--post-welcome-failure-text TEXT] [--post-join-empty-actor-probe] "
           "[--post-join-actor-probe-after N] [--post-join-actor-channel N] "
           "[--post-join-actor-followup-probe] "
-          "[--post-join-actor-followup-after N] [--post-join-actor-name-mode "
-          "legacy|string] [--post-join-actor-payload-mode "
+          "[--post-join-actor-followup-after N] "
+          "[--post-join-datastream-open-probe] "
+          "[--post-join-datastream-open-after N] "
+          "[--post-join-datastream-channel N] "
+          "[--post-join-datastream-wire-channel N] "
+          "[--post-join-datastream-header-mode "
+          "reliable|open-reliable|pad-before-chindex] "
+          "[--post-join-actor-name-mode legacy|string] "
+          "[--post-join-actor-payload-mode "
           "empty|zero8|zero32|netguid0|netguid1|netguid1-class0|netguid1-"
           "class1|dynamic-guid2|dynamic-guid2-class0|dynamic-guid2-class1|"
           "dynamic-guid2-class3|dynamic-guid2-content-empty|mustmap-none-guid2|"
@@ -550,6 +614,8 @@ int main(int argc, char **argv) {
       sess.next_out_reliable_ch0 =
           (uint16_t)((sess.server_sequence + 1) & 1023);
       sess.next_out_reliable_actor =
+          (uint16_t)((sess.server_sequence + 1) & 1023);
+      sess.next_out_reliable_datastream =
           (uint16_t)((sess.server_sequence + 1) & 1023);
 
       sessions[ck] = sess;
@@ -796,6 +862,24 @@ int main(int argc, char **argv) {
                  "client seq=%u after actor ACK; likely waiting for "
                  "SerializeNewActor/NetGUID payload\n",
                  (unsigned)pn.seq);
+        }
+
+        if (it->second.phase == ue574::SessionPhase::Welcomed && pn.ok &&
+            it->second.sent_datastream_open_probe &&
+            !it->second.datastream_open_packet_acked &&
+            it->second.last_datastream_open_packet_seq != 0 &&
+            pn.acked_seq >= it->second.last_datastream_open_packet_seq) {
+          it->second.datastream_open_packet_acked = true;
+        }
+
+        if (it->second.datastream_open_packet_acked &&
+            !it->second.announced_datastream_open_packet_acked) {
+          it->second.announced_datastream_open_packet_acked = true;
+          printf("  DataStream open probe packet was ACKed by client (server "
+                 "seq=%u, client acked=%u); channel 2 DataStream handshake "
+                 "envelope reached UE processing\n",
+                 (unsigned)it->second.last_datastream_open_packet_seq,
+                 (unsigned)pn.acked_seq);
         }
 
         if (it->second.phase == ue574::SessionPhase::Welcomed && pn.ok &&
@@ -1073,6 +1157,57 @@ int main(int argc, char **argv) {
           }
         }
 
+        // Optional v49 probe: UE5.7 Iris creates static channel 2 as
+        // DataStream. Before trying actor channels, send the same zero-payload
+        // reliable DataStream handshake bunch that
+        // UDataStreamChannel::SendOpenBunch emits.
+        if (experimental_control_replies && post_join_datastream_open_probe &&
+            it->second.real_ue &&
+            it->second.phase == ue574::SessionPhase::Welcomed &&
+            it->second.sent_nmt_welcome &&
+            !it->second.sent_datastream_open_probe &&
+            !sent_server_packet_this_rx && pn.ok && it->second.saw_exact_join &&
+            it->second.post_welcome_client_packets >=
+                post_join_datastream_open_after &&
+            pn.acked_seq >= it->second.last_welcome_packet_seq) {
+
+          // v52: use the actual UE channel index by default. v51 proved the
+          // logical<<1 calibration was wrong: wire 4 still decoded into the
+          // Voice-channel path. Use channel 2 for the existing DataStream
+          // channel, and keep --post-join-datastream-wire-channel as an
+          // explicit raw override for future A/B tests.
+          const uint16_t datastream_wire_ch =
+              post_join_datastream_wire_channel
+                  ? post_join_datastream_wire_channel
+                  : post_join_datastream_channel;
+          auto out = ue574::build_experimental_datastream_open_probe(
+              it->second.handshake, it->second.last_client_packet_seq,
+              it->second.next_server_packet_seq, datastream_wire_ch,
+              it->second.next_out_reliable_datastream,
+              post_join_datastream_header_mode);
+          printf("  sending experimental DataStream open probe after Join (%zu "
+                 "bytes seq=%u logical-ch=%u wire-ch=%u chseq=%u ack_client=%u "
+                 "name=DataStream zero-payload header-mode=%s)\n",
+                 out.size(), (unsigned)it->second.next_server_packet_seq,
+                 (unsigned)post_join_datastream_channel,
+                 (unsigned)datastream_wire_ch,
+                 (unsigned)it->second.next_out_reliable_datastream,
+                 (unsigned)it->second.last_client_packet_seq,
+                 ue574::datastream_header_mode_name(
+                     post_join_datastream_header_mode));
+          printf("  DataStream note: this tests Iris channel-2 handshake, not "
+                 "classic actor-channel replication\n");
+          udp_send_logged(fd, from, out.data(), out.size(), binlog);
+          it->second.last_datastream_open_packet_seq =
+              it->second.next_server_packet_seq;
+          it->second.next_server_packet_seq =
+              (uint16_t)((it->second.next_server_packet_seq + 1) & 0x3fff);
+          it->second.next_out_reliable_datastream =
+              (uint16_t)((it->second.next_out_reliable_datastream + 1) & 1023);
+          it->second.sent_datastream_open_probe = true;
+          sent_server_packet_this_rx = true;
+        }
+
         // Optional v35 probe: once we have a Join-side signal, send the
         // smallest possible reliable Actor-channel open bunch. This is not a
         // valid PlayerController/Pawn replication payload yet; it is a
@@ -1293,28 +1428,31 @@ int main(int argc, char **argv) {
   printf("session summary:\n");
   for (const auto &kv : sessions) {
     const Session &sess = kv.second;
-    printf("  phase=%s server_next=%u last_client_seq=%u client_acked=%u "
-           "ack_only_sent=%u NetSpeed=%s Join=%s ActorProbe=%s ActorAck=%s "
-           "ActorFollowup=%s ActorFollowupAck=%s ActorChannelFailure=%s "
-           "ActorLatePressure=%s BunchWrongType=%s Failure=%s "
-           "FailureReceived=%s lateDirectLogin=%s\n",
-           ue574::session_phase_name(sess.phase),
-           (unsigned)sess.next_server_packet_seq,
-           (unsigned)sess.max_client_seq_seen,
-           (unsigned)sess.max_client_acked_seen,
-           (unsigned)sess.ack_only_packets_sent,
-           sess.saw_exact_netspeed ? "yes" : "no",
-           sess.saw_exact_join ? "yes" : "no",
-           sess.sent_empty_actor_probe ? "yes" : "no",
-           sess.actor_probe_packet_acked ? "yes" : "no",
-           sess.sent_actor_followup_probe ? "yes" : "no",
-           sess.actor_followup_packet_acked ? "yes" : "no",
-           sess.saw_actor_channel_failure ? "yes" : "no",
-           sess.saw_actor_probe_late_pressure ? "yes" : "no",
-           sess.saw_bunch_wrong_channel_type ? "yes" : "no",
-           sess.sent_post_welcome_failure ? "yes" : "no",
-           sess.saw_failure_received ? "yes" : "no",
-           sess.saw_direct_login_after_welcome ? "yes" : "no");
+    printf(
+        "  phase=%s server_next=%u last_client_seq=%u client_acked=%u "
+        "ack_only_sent=%u NetSpeed=%s Join=%s DataStreamProbe=%s "
+        "DataStreamAck=%s ActorProbe=%s ActorAck=%s ActorFollowup=%s "
+        "ActorFollowupAck=%s ActorChannelFailure=%s ActorLatePressure=%s "
+        "BunchWrongType=%s Failure=%s FailureReceived=%s lateDirectLogin=%s\n",
+        ue574::session_phase_name(sess.phase),
+        (unsigned)sess.next_server_packet_seq,
+        (unsigned)sess.max_client_seq_seen,
+        (unsigned)sess.max_client_acked_seen,
+        (unsigned)sess.ack_only_packets_sent,
+        sess.saw_exact_netspeed ? "yes" : "no",
+        sess.saw_exact_join ? "yes" : "no",
+        sess.sent_datastream_open_probe ? "yes" : "no",
+        sess.datastream_open_packet_acked ? "yes" : "no",
+        sess.sent_empty_actor_probe ? "yes" : "no",
+        sess.actor_probe_packet_acked ? "yes" : "no",
+        sess.sent_actor_followup_probe ? "yes" : "no",
+        sess.actor_followup_packet_acked ? "yes" : "no",
+        sess.saw_actor_channel_failure ? "yes" : "no",
+        sess.saw_actor_probe_late_pressure ? "yes" : "no",
+        sess.saw_bunch_wrong_channel_type ? "yes" : "no",
+        sess.sent_post_welcome_failure ? "yes" : "no",
+        sess.saw_failure_received ? "yes" : "no",
+        sess.saw_direct_login_after_welcome ? "yes" : "no");
   }
 
   if (binlog)

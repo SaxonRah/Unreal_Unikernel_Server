@@ -51,19 +51,17 @@ static bool read_int_wrapped_safe(BitReader &r, uint32_t max_value,
 }
 
 static bool read_int_packed_approx(BitReader &r, uint32_t &out) {
-  // FArchive::SerializeIntPacked-style LEB128-ish reader: 7 data bits plus a
-  // continuation bit per byte. This is correct for zero and small channel ids,
-  // which is all the control channel needs for the first pass.
+  // UE FArchive::SerializeIntPacked: continuation bit first, then 7 data bits.
   out = 0;
   uint32_t shift = 0;
 
   for (int group = 0; group < 5; ++group) {
-    uint64_t low7 = 0;
-    if (!r.read_bits_u64(7, low7))
-      return false;
-
     bool more = false;
     if (!r.read_bit(more))
+      return false;
+
+    uint64_t low7 = 0;
+    if (!r.read_bits_u64(7, low7))
       return false;
 
     out |= (uint32_t)(low7 << shift);
